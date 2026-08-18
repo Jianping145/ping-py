@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-4KPorno.XXX TVBox专用兼容版 -- v22
-====================================
-【v22 关键修复】
-  - Accept-Encoding 去掉 br，避免 Brotli 压缩导致无 brotli 模块时乱码
-  - 其余同 v21
-====================================
+4KPorno.XXX 调试版 -- v23
+==========================
+带完整 TVBox 日志输出，用于定位加载失败原因
+==========================
 """
 
 import sys
@@ -20,62 +18,65 @@ import ssl
 import time
 from urllib import parse, request
 
+# 强制开启调试，输出到 stderr（TVBox 日志可见）
 DEBUG = True
-
 
 def _log(msg):
     try:
-        print("[4KPorno] " + str(msg), file=sys.stderr, flush=True)
-    except Exception:
+        sys.stderr.write("[4KPorno] " + str(msg) + "\n")
+        sys.stderr.flush()
+    except Exception as e:
         pass
 
+_log("=== 4KPorno v23 模块加载 ===")
+_log("Python版本: " + sys.version)
+_log("当前工作目录: " + os.getcwd())
 
+# SSL 上下文
 _SSL_CTX = None
-
 def _get_ssl_ctx():
     global _SSL_CTX
     if _SSL_CTX is None:
-        _SSL_CTX = ssl.create_default_context()
-        _SSL_CTX.check_hostname = False
-        _SSL_CTX.verify_mode = ssl.CERT_NONE
+        try:
+            _SSL_CTX = ssl.create_default_context()
+            _SSL_CTX.check_hostname = False
+            _SSL_CTX.verify_mode = ssl.CERT_NONE
+            _log("SSL上下文创建成功")
+        except Exception as e:
+            _log("SSL上下文创建失败: " + str(e))
+            _SSL_CTX = ssl._create_unverified_context()
     return _SSL_CTX
-
 
 class BaseSpider:
     UA_POOL = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
     ]
 
     def __init__(self, extend=""):
+        _log("BaseSpider.__init__ 开始, extend=" + str(extend))
         self.extend = extend
-        _log("BaseSpider init, extend=" + str(extend))
+        _log("BaseSpider.__init__ 完成")
 
     @classmethod
     def _random_ua(cls):
-        return random.choice(cls.UA_POOL)
+        return cls.UA_POOL[0]
 
     @classmethod
     def _build_headers(cls, extra=None):
-        # v22 关键修复：去掉 br，避免 Brotli 压缩导致乱码
         h = {
             "User-Agent": cls._random_ua(),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Accept-Encoding": "gzip",  # 只接受 gzip，不接受 br
+            "Accept-Encoding": "gzip",
             "Connection": "keep-alive",
             "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Cache-Control": "max-age=0",
         }
         if extra:
             h.update(extra)
         return h
 
     def fetch(self, url, headers=None, timeout=20, retries=2):
+        _log("fetch开始: " + url[:80])
         h = self._build_headers(headers)
         last_err = ""
         for attempt in range(retries + 1):
@@ -85,43 +86,31 @@ class BaseSpider:
                 with request.urlopen(req, timeout=timeout, context=ctx) as resp:
                     data = resp.read()
                     ce = resp.headers.get("Content-Encoding", "")
+                    _log("fetch响应: status=" + str(resp.status) + " encoding=" + ce + " len=" + str(len(data)))
                     if "gzip" in ce:
                         data = gzip.decompress(data)
-                    # 不再处理 br，因为请求头已禁止服务器返回 br
-                    charset = "utf-8"
-                    ct = resp.headers.get("Content-Type", "")
-                    m = re.search(r"charset=([\w-]+)", ct, re.I)
-                    if m:
-                        charset = m.group(1)
+                        _log("gzip解压后: " + str(len(data)))
                     try:
-                        text = data.decode(charset)
+                        text = data.decode("utf-8")
                     except UnicodeDecodeError:
                         text = data.decode("utf-8", errors="replace")
-                    _log("fetch success: " + url[:60] + "... len=" + str(len(text)))
+                        _log("解码使用replace模式")
+                    _log("fetch成功, html长度=" + str(len(text)))
+                    # 检查关键标记
+                    if "class=\"item\"" in text:
+                        _log("HTML包含item标记")
+                    else:
+                        _log("HTML不包含item标记!")
+                    if "<video" in text:
+                        _log("HTML包含video标记")
                     return text
             except Exception as e:
                 last_err = str(e)
-                _log("fetch attempt " + str(attempt + 1) + " failed: " + last_err)
+                _log("fetch尝试" + str(attempt+1) + "失败: " + last_err)
                 if attempt < retries:
                     time.sleep(1)
-        _log("fetch final error for " + url[:60] + ": " + last_err)
+        _log("fetch最终失败: " + last_err)
         return ""
-
-    def fetch_binary(self, url, headers=None, timeout=20):
-        h = self._build_headers(headers)
-        try:
-            req = request.Request(url, headers=h, method="GET")
-            ctx = _get_ssl_ctx()
-            with request.urlopen(req, timeout=timeout, context=ctx) as resp:
-                data = resp.read()
-                ce = resp.headers.get("Content-Encoding", "")
-                if "gzip" in ce:
-                    data = gzip.decompress(data)
-                ct = resp.headers.get("Content-Type", "application/octet-stream")
-                return resp.status, ct, data
-        except Exception as e:
-            _log("fetch_binary error: " + str(e))
-            return 404, "text/plain", b""
 
     @staticmethod
     def clean_title(title):
@@ -138,26 +127,8 @@ class BaseSpider:
             return ""
         return pic_url.replace("@2x", "%402x")
 
-    def homeContent(self, filter=False):
-        raise NotImplementedError
-
-    def categoryContent(self, tid, pg, filter, extend):
-        raise NotImplementedError
-
-    def detailContent(self, ids):
-        raise NotImplementedError
-
-    def playerContent(self, flag, id, vipFlags):
-        raise NotImplementedError
-
-    def searchContent(self, key, quick, pg="1"):
-        raise NotImplementedError
-
-    def localProxy(self, param):
-        return [404, "text/plain", "Not Supported".encode("utf-8")]
-
     def init(self, extend=""):
-        _log("init called with extend=" + str(extend))
+        _log("init()被调用, extend=" + str(extend))
         return True
 
     def isVideoFormat(self, url):
@@ -167,14 +138,13 @@ class BaseSpider:
     def manualVideoCheck(self):
         return False
 
+    def localProxy(self, param):
+        return [404, "text/plain", "Not Supported".encode("utf-8")]
+
 
 class Spider(BaseSpider):
     realm_name = "4KPorno"
-    realm_level = 1
-    defense_level = 0
-
     siteUrl = "https://www.4kporno.xxx"
-    lang = ""
 
     SORTS = {
         "latest-updates": "\u6700\u65b0\u66f4\u65b0",
@@ -199,23 +169,24 @@ class Spider(BaseSpider):
         "private": "Private",
     }
 
-    NETWORKS = {}
-
-    RE_ITEM = re.compile(
-        r'<div class="item">\s*<a href="(https?://[^"]+/videos/(\d+)/[^"]*/?)"[^>]*title="([^"]*)"[^>]*>'
-        r'.*?<img[^>]*src="([^"]*)"[^>]*alt="([^"]*)"[^>]*>.*?</a>',
-        re.S
-    )
-
     def __init__(self, extend=""):
+        _log("Spider.__init__ 开始")
         super().__init__(extend)
-        _log("Spider initialized")
+        _log("Spider.__init__ 完成")
 
     def _extract_list(self, html):
+        _log("_extract_list开始, html长度=" + str(len(html)))
         videos = []
         seen = set()
         try:
-            for match in self.RE_ITEM.finditer(html):
+            # 使用更宽松的正则
+            pattern = re.compile(
+                r'<div class="item">\s*<a href="(https?://[^"]+/videos/(\d+)/[^"]*/?)"[^>]*title="([^"]*)"[^>]*>.*?<img[^>]*src="([^"]*)"[^>]*alt="([^"]*)"[^>]*>.*?</a>',
+                re.S
+            )
+            matches = list(pattern.finditer(html))
+            _log("正则匹配到 " + str(len(matches)) + " 个结果")
+            for match in matches:
                 full_url, vid, title, pic, alt = match.groups()
                 if vid in seen:
                     continue
@@ -228,7 +199,8 @@ class Spider(BaseSpider):
                     "vod_remarks": "",
                 })
         except Exception as e:
-            _log("_extract_list error: " + str(e))
+            _log("_extract_list异常: " + str(e))
+        _log("_extract_list返回 " + str(len(videos)) + " 个视频")
         return videos
 
     def _build_url(self, path):
@@ -237,6 +209,7 @@ class Spider(BaseSpider):
         return self.siteUrl + path
 
     def homeContent(self, filter=False):
+        _log("homeContent()被调用")
         try:
             classes = []
             for sort_id, sort_name in self.SORTS.items():
@@ -245,24 +218,22 @@ class Spider(BaseSpider):
                 classes.append({"type_name": cat_name, "type_id": "cat:" + cat_id})
             for site_id, site_name in self.SITES.items():
                 classes.append({"type_name": site_name, "type_id": "site:" + site_id})
-            for net_id, net_name in self.NETWORKS.items():
-                classes.append({"type_name": net_name, "type_id": "net:" + net_id})
 
             filters = {}
             for c in classes:
                 filters[c["type_id"]] = []
 
             result = {"class": classes, "filters": filters}
-            _log("homeContent return " + str(len(classes)) + " classes")
+            _log("homeContent返回 " + str(len(classes)) + " 个分类")
             return result
         except Exception as e:
-            _log("homeContent error: " + str(e))
+            _log("homeContent异常: " + str(e))
             return {"class": [], "filters": {}}
 
     def categoryContent(self, tid, pg, filter, extend):
+        _log("categoryContent()被调用 tid=" + str(tid) + " pg=" + str(pg))
         try:
             page = int(pg) if str(pg).isdigit() else 1
-            _log("categoryContent tid=" + str(tid) + " pg=" + str(page))
 
             if tid.startswith("sort:"):
                 sort_id = tid.replace("sort:", "")
@@ -279,21 +250,12 @@ class Spider(BaseSpider):
             elif tid.startswith("site:"):
                 site_id = tid.replace("site:", "")
                 path = "/sites/" + site_id + "/" + str(page) + "/" if page > 1 else "/sites/" + site_id + "/"
-            elif tid.startswith("net:"):
-                net_id = tid.replace("net:", "")
-                path = "/networks/" + net_id + "/" + str(page) + "/" if page > 1 else "/networks/" + net_id + "/"
             else:
                 path = "/categories/" + tid + "/" + str(page) + "/" if page > 1 else "/categories/" + tid + "/"
 
             url = self._build_url(path)
             html = self.fetch(url, timeout=20)
             videos = self._extract_list(html)
-
-            if not videos and page > 1 and tid.startswith("cat:"):
-                cat_id = tid.replace("cat:", "")
-                path = "/categories/" + cat_id + "/latest-updates/" + str(page) + "/"
-                html = self.fetch(self._build_url(path), timeout=20)
-                videos = self._extract_list(html)
 
             has_next = len(videos) >= 20
             result = {
@@ -303,16 +265,18 @@ class Spider(BaseSpider):
                 "limit": len(videos),
                 "total": 999 * len(videos) if has_next else page * len(videos),
             }
-            _log("categoryContent return " + str(len(videos)) + " videos")
+            _log("categoryContent返回 " + str(len(videos)) + " 个视频")
             return result
         except Exception as e:
-            _log("categoryContent error: " + str(e))
+            _log("categoryContent异常: " + str(e))
+            import traceback
+            _log(traceback.format_exc())
             return {"list": [], "page": 1, "pagecount": 1, "limit": 0, "total": 0}
 
     def detailContent(self, ids):
+        _log("detailContent()被调用 ids=" + str(ids))
         try:
             vid = ids[0] if isinstance(ids, list) else ids
-            _log("detailContent vid=" + str(vid))
 
             if vid.startswith("/"):
                 url = self._build_url(vid)
@@ -323,7 +287,7 @@ class Spider(BaseSpider):
 
             html = self.fetch(url, timeout=20)
             if not html:
-                _log("detailContent html empty")
+                _log("detailContent html为空")
                 return {"list": []}
 
             title_match = re.search(r'<h1[^>]*>(.*?)</h1>', html, re.S | re.I)
@@ -371,15 +335,17 @@ class Spider(BaseSpider):
                     "vod_play_url": play_url,
                 }]
             }
-            _log("detailContent return title=" + title)
+            _log("detailContent返回: " + title)
             return result
         except Exception as e:
-            _log("detailContent error: " + str(e))
+            _log("detailContent异常: " + str(e))
+            import traceback
+            _log(traceback.format_exc())
             return {"list": []}
 
     def playerContent(self, flag, id, vipFlags):
+        _log("playerContent()被调用")
         try:
-            _log("playerContent flag=" + str(flag) + " id=" + (id[:60] if id else "empty"))
             if not id:
                 return {"parse": 1, "url": "", "header": ""}
 
@@ -394,65 +360,47 @@ class Spider(BaseSpider):
             if not real_url.startswith("http"):
                 real_url = self._build_url(real_url)
 
-            result = {
+            return {
                 "parse": 0,
                 "url": real_url,
                 "header": json.dumps({
                     "Referer": self.siteUrl + "/",
                     "User-Agent": self._random_ua(),
-                    "Accept": "*/*",
-                    "Accept-Encoding": "identity",
-                    "Connection": "keep-alive",
                 }),
             }
-            _log("playerContent return url=" + real_url[:60])
-            return result
         except Exception as e:
-            _log("playerContent error: " + str(e))
+            _log("playerContent异常: " + str(e))
             return {"parse": 1, "url": "", "header": ""}
 
     def searchContent(self, key, quick, pg="1"):
+        _log("searchContent()被调用 key=" + str(key))
         try:
-            _log("searchContent key=" + str(key) + " pg=" + str(pg))
             return self.categoryContent(tid="search:" + key, pg=pg, filter=False, extend={})
         except Exception as e:
-            _log("searchContent error: " + str(e))
+            _log("searchContent异常: " + str(e))
             return {"list": [], "page": 1, "pagecount": 1, "limit": 0, "total": 0}
-
-    def localProxy(self, param):
-        try:
-            _log("localProxy param=" + str(param))
-            return [404, "text/plain", "Not Supported".encode("utf-8")]
-        except Exception as e:
-            _log("localProxy error: " + str(e))
-            return [404, "text/plain", b"error"]
 
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="4KPorno.XXX TVBox兼容版 v22")
-    parser.add_argument("--test", choices=["home", "category", "detail", "player", "search"], help="测试接口")
-    parser.add_argument("--id", default="/zh/videos/93817649/hotel-vixen-season-3-episode-2-unparalleled-customer-service/", help="视频路径")
-    parser.add_argument("--cat", default="sort:latest-updates", help="分类ID")
-    parser.add_argument("--kw", default="lesbian", help="搜索关键词")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--test", choices=["home", "category", "detail", "player", "search"])
+    parser.add_argument("--id", default="/zh/videos/93817649/hotel-vixen-season-3-episode-2-unparalleled-customer-service/")
+    parser.add_argument("--cat", default="sort:latest-updates")
+    parser.add_argument("--kw", default="lesbian")
     args = parser.parse_args()
 
     spider = Spider()
 
     if args.test == "home" or not args.test:
-        result = spider.homeContent()
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(spider.homeContent(), ensure_ascii=False, indent=2))
     elif args.test == "category":
-        result = spider.categoryContent(tid=args.cat, pg="1", filter=False, extend={})
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(spider.categoryContent(tid=args.cat, pg="1", filter=False, extend={}), ensure_ascii=False, indent=2))
     elif args.test == "detail":
-        result = spider.detailContent([args.id])
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(spider.detailContent([args.id]), ensure_ascii=False, indent=2))
     elif args.test == "player":
         detail = spider.detailContent([args.id])
         play_url = detail["list"][0]["vod_play_url"] if detail.get("list") else ""
-        result = spider.playerContent(flag="4KPorno", id=play_url, vipFlags="")
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(spider.playerContent(flag="4KPorno", id=play_url, vipFlags=""), ensure_ascii=False, indent=2))
     elif args.test == "search":
-        result = spider.searchContent(key=args.kw, quick="1", pg="1")
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(spider.searchContent(key=args.kw, quick="1", pg="1"), ensure_ascii=False, indent=2))
