@@ -61,9 +61,28 @@ class Spider(Spider):
         filters = {}
         for p, i in self.CATE.items():
             tid = i["id"]
-            # type_extend: TVBox首页子分类显示
-            ch = [{"type_id":t,"type_name":n} for t,n in i["children"].items()]
-            cls.append({"type_id":tid,"type_name":p,"type_flag":"1","type_extend":ch})
+            # 子分类列表（带"全部"）
+            ch = [{"type_id": "", "type_name": "全部"}] + [{"type_id": t, "type_name": n} for t, n in i["children"].items()]
+            ch_alt = [{"id": "", "name": "全部"}] + [{"id": t, "name": n} for t, n in i["children"].items()]
+            # 主分类：保留多种子分类字段格式，尽可能兼容不同客户端
+            cls.append({
+                "type_id": tid,
+                "type_name": p,
+                "type_flag": "1",
+                "type_extend": ch,
+                "type_list": ch,
+                "child": ch_alt,
+                "children": ch_alt
+            })
+            # 将子分类也作为独立 class 项追加（带 type_pid）
+            # 这样不支持 type_extend 的客户端（如 Fengmi）也能直接看到并点击子分类
+            for t, n in i["children"].items():
+                cls.append({
+                    "type_id": t,
+                    "type_name": n,
+                    "type_flag": "1",
+                    "type_pid": tid
+                })
             # filters: TVBox分类页面筛选
             filters[tid] = [
                 {
@@ -75,9 +94,9 @@ class Spider(Spider):
         lst = []
         try:
             h = self._req(self.H + "/")
-            if h:lst = self._cards(h)
-        except:pass
-        return {"class":cls,"filters":filters,"list":lst}
+            if h: lst = self._cards(h)
+        except: pass
+        return {"class": cls, "filters": filters, "list": lst}
 
     def homeVideoContent(self):
         lst = []
