@@ -73,8 +73,7 @@ class Spider(Spider):
                 "type_list": ch,
                 "child": ch_alt,
                 "children": ch_alt,
-                "land": 1,
-                "ratio": 1.33
+                "ratio": 0.75
             })
             # 将子分类也作为独立 class 项追加（带 type_pid）
             # 这样不支持 type_extend 的客户端（如 Fengmi）也能直接看到并点击子分类
@@ -84,8 +83,7 @@ class Spider(Spider):
                     "type_name": n,
                     "type_flag": "0",
                     "type_pid": tid,
-                    "land": 1,
-                    "ratio": 1.33
+                    "ratio": 0.75
                 })
             # filters: TVBox分类页面筛选
             filters[tid] = [
