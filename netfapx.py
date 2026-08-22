@@ -456,7 +456,7 @@ class ZheTian_Master(YuanTianShu):
                 if src and self.isVideoFormat(src):
                     return f"第1集${src}"
 
-        # 第2层: iframe嵌入 → 预解析嵌入页
+        # 第2层: iframe嵌入 → 直接返回iframe地址让TVBox JAR解析
         iframe_src = ""
         iframe = soup.select_one("iframe")
         if iframe:
@@ -468,9 +468,6 @@ class ZheTian_Master(YuanTianShu):
         if iframe_src:
             if iframe_src.startswith("//"):
                 iframe_src = "https:" + iframe_src
-            real_url = self._parse_embed_page(iframe_src)
-            if real_url:
-                return f"第1集${real_url}"
             return f"第1集${iframe_src}"
 
         # 第3层: player变量
@@ -674,33 +671,29 @@ class ZheTian_Master(YuanTianShu):
         if not id:
             return {"parse": 1, "url": "", "header": ""}
 
-        embed_signs = ["/e/", "/embed/", "/player/", "/stream/", "/v/", "iframe", "php", "html"]
-        embed_domains = ["dsvplay", "luluvdo", "streamtape", "doodstream", "mixdrop", "voe", "filemoon",
-                         "streamhub", "upstream", "evoload", "vidcloud", "sbembed", "fembed",
-                         "streamsb", "sbface", "lvturbo", "wolfstream", "vanfem", "dood", "stream"]
+        # 嵌入播放器检测
+        embed_signs = ["/e/", "/embed/", "/player/", "/stream/", "/v/"]
+        embed_domains = ["dsvplay", "luluvdo", "playmogo", "streamtape", "doodstream", "mixdrop", 
+                         "voe", "filemoon", "streamhub", "upstream", "evoload", "vidcloud", 
+                         "sbembed", "fembed", "streamsb", "sbface", "lvturbo", "wolfstream", 
+                         "vanfem", "dood"]
         is_embed = any(s in id for s in embed_signs) or any(d in id.lower() for d in embed_domains)
 
         if is_embed:
-            print(f"[兵字秘] 嵌入播放器: {id[:100]}...")
-            return {
-                "parse": 1,
-                "url": id,
-                "header": f"Referer={self.siteUrl}&User-Agent={self.headers['User-Agent']}"
-            }
+            print(f"[兵字秘] 嵌入播放器: {id[:60]}...")
+            # 关键: 嵌入页用parse:1让TVBox JAR解析，header尽量简单
+            return {"parse": 1, "url": id, "header": ""}
 
+        # xhcdn CDN直链
         if "xhcdn.com" in id or "xhamster" in id:
             cookies = "; ".join([f"{k}={v}" for k, v in self.session.cookies.items()])
-            header = f"Referer={self.siteUrl}&User-Agent={self.headers['User-Agent']}"
+            header = f"Referer={self.siteUrl}"
             if cookies:
                 header += f"&Cookie={cookies}"
-            print(f"[兵字秘] xhcdn播放")
             return {"parse": 0, "url": id, "header": header}
 
-        return {
-            "parse": 0,
-            "url": id,
-            "header": f"Referer={self.siteUrl}&User-Agent={self.headers['User-Agent']}"
-        }
+        # 普通直链
+        return {"parse": 0, "url": id, "header": f"Referer={self.siteUrl}"}
 
     def searchContent(self, key, quick, pg="1"):
         try:
