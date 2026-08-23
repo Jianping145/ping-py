@@ -21,7 +21,7 @@ from base.spider import Spider
 
 RE_WATCH_ID = re.compile(r"/watch/\d+/?$")
 RE_WATCH_ACTOR = re.compile(r"/watch/actor/[^/]+")
-RE_VIDEO_EXT = re.compile(r"\.(m3u8|mp4|flv|mkv|ts|avi|mov)$", re.I)
+RE_VIDEO_EXT = re.compile(r"\.(m3u8|mp4|flv|mkv|ts|avi|mov)(?:\?|#|$)", re.I)
 RE_PLAYER_VAR = re.compile(r"var\s+player_[a-zA-Z_]*\s*=\s*({.+?});")
 RE_VIDEO_URL = re.compile(r"(?:videoUrl|video_url|sourceUrl|src|file)\s*[:=]\s*[\"\']([^\"\']+\.(?:m3u8|mp4|flv))[\"\']")
 RE_JWPLAYER = re.compile(r"jwplayer\(\".*?\"\)\.setup\({.*?file:\s*[\"\']([^\"\']+)[\"\']", re.DOTALL)
@@ -49,8 +49,7 @@ class YuanTianShu(Spider):
     }
 
     def fetch(self, url, headers=None, timeout=15, referer=None):
-        h = dict(self.headers)
-        h.update(headers or {})
+        h = {**self.headers, **(headers or {})}
         if referer:
             h["Referer"] = referer
         for i in range(3):
@@ -67,7 +66,30 @@ class YuanTianShu(Spider):
 
 
 class ZheTian_Master(YuanTianShu):
-    def _configure(self):
+    # 类级别配置（TVBox 环境兼容性）
+    siteUrl = "https://netfapx.net"
+    proxyPort = 9979
+    luluvdo_domains = ["luluvdo.com", "lulustream.com", "lulucdn.com", "luluvid.com", "lulustream.net", "luluvid.net", "lulucdn.net"]
+    doodstream_domains = [
+        "dood.to", "dood.so", "dood.watch", "dood.ws", "dood.sh",
+        "dood.cx", "dood.la", "dood.pm", "dood.re", "dood.wf",
+        "dood.yt", "dooood.com", "doods.pro", "ds2play.com",
+        "doodstream.com", "playmogo.com", "doodcdn.com",
+        "doply.net",
+    ]
+    embed_domains = [
+        "dsvplay", "streamtape", "mixdrop", "voe", "filemoon",
+        "streamhub", "upstream", "evoload", "vidcloud", "sbembed",
+        "fembed", "streamsb", "sbface", "lvturbo", "wolfstream",
+        "vanfem", "streamwish", "filelions", "vidhide", "vidguard",
+        "mp4upload", "yourupload", "fastupload", "videovard",
+        "tapecontent", "strcloud", "streamta", "stape",
+        "streamadblock", "streamvid", "embedrise", "vidmoly",
+        "streamhg", "vidoza", "uqload",
+    ]
+
+
+    def __init__(self):
         self.siteUrl = "https://netfapx.net"
         self.classes = [
             {"type_id": "latest-videos", "type_name": "最新视频"},
@@ -104,7 +126,7 @@ class ZheTian_Master(YuanTianShu):
         ]
 
         # luluvdo / lulustream
-        self.luluvdo_domains = ["luluvdo.com", "lulustream.com", "lulucdn.com"]
+        self.luluvdo_domains = ["luluvdo.com", "lulustream.com", "lulucdn.com", "luluvid.com", "lulustream.net", "luluvid.net", "lulucdn.net"]
 
         # DoodStream 及其镜像
         self.doodstream_domains = [
@@ -127,7 +149,6 @@ class ZheTian_Master(YuanTianShu):
         ]
 
     def init(self, extend=""):
-        self._configure()
         print("[遮天大师] v11 luluvdo专版已激活")
         return True
 
@@ -458,7 +479,7 @@ class ZheTian_Master(YuanTianShu):
         return {
             "list": [{
                 "vod_id": vod_id,
-                    "vod_name": name or "Pornstar",
+                 "vod_name": name or "Pornstar",
                 "vod_pic": pic,
                 "vod_content": f"{name} 的作品合集" if name else "",
                 "vod_actor": name or "",
@@ -608,146 +629,151 @@ class ZheTian_Master(YuanTianShu):
     # ═══════════════════════════════════════════════════
     def _parse_embed_page(self, embed_url):
         try:
-            print(f"[兵字秘] 预解析嵌入页: {embed_url[:80]}...")
-
-            # ── 第一步：检测 luluvdo / lulustream ──
-            is_luluvdo = any(d in embed_url.lower() for d in self.luluvdo_domains)
+            print("[兵字秘] 预解析: " + str(embed_url)[:80])
+            luluvdo_domains = getattr(self, 'luluvdo_domains', ["luluvdo.com", "lulustream.com", "lulucdn.com", "luluvid.com", "lulustream.net", "luluvid.net", "lulucdn.net"])
+            is_luluvdo = any(d in embed_url.lower() for d in luluvdo_domains)
             if is_luluvdo:
-                print(f"[兵字秘] 检测到 luluvdo 类型嵌入页")
+                print("[兵字秘] 检测到 luluvdo")
                 return self._parse_luluvdo(embed_url)
-
-            # ── 第二步：检测 DoodStream ──
-            is_dood = any(d in embed_url.lower() for d in self.doodstream_domains)
+            doodstream_domains = getattr(self, 'doodstream_domains', ["dood.to", "dood.so", "dood.watch", "playmogo.com", "doply.net"])
+            is_dood = any(d in embed_url.lower() for d in doodstream_domains)
             if is_dood:
-                print(f"[兵字秘] 检测到 DoodStream 类型嵌入页")
+                print("[兵字秘] 检测到 DoodStream")
                 return self._parse_doodstream(embed_url)
-
-            # ── 第三步：通用嵌入页解析 ──
             return self._parse_generic_embed(embed_url)
-
         except Exception as e:
-            print(f"[兵字秘] 嵌入页预解析异常: {e}")
+            print("[兵字秘] 预解析异常: " + str(e))
             return None
 
-    # ───────── luluvdo / lulustream 专用解析 ─────────
-    def _parse_luluvdo(self, embed_url):
-        """
-        【四极境 · luluvdo 专用解析】
-        luluvdo 嵌入页使用 eval(p,a,c,k,e,d) 混淆 jwplayer 配置。
-        需要解码 eval 块，从 sources[0].file 提取 m3u8 直链。
-        """
-        try:
-            headers = {"Referer": self.siteUrl}
-            html = self.fetch(embed_url, headers=headers, referer=self.siteUrl)
-            if not html:
-                print("[兵字秘·luluvdo] 嵌入页下载失败")
-                return None
 
-            # 1. 提取 eval 块
+    def _parse_luluvdo(self, embed_url):
+        try:
+            print("[luluvdo] 解析: " + str(embed_url))
+            site_url = getattr(self, 'siteUrl', "https://netfapx.net")
+            html = self.fetch(embed_url, headers={"Referer": site_url}, referer=site_url)
+            if not html:
+                print("[luluvdo] 下载失败")
+                return None
+            print("[luluvdo] 下载成功 len=" + str(len(html)))
             eval_match = re.search(
-                r'eval\(function\(p,a,c,k,e,d\)\{while\(c--\)if\(k\[c\]\)p=p\.replace\(new RegExp\(\'\\\\b\'\+c\.toString\(a\)\+\'\\\\b\'\,\'g\'\),k\[c\]\);return p\}\(\'(.+?)\',(\d+),(\d+),\'(.+?)\'\.split\(\'\|\'\)\)\)',
+                r"eval\(function\(p,a,c,k,e,d\)\{while\(c--\)if\(k\[c\]\)p=p\.replace\(new RegExp\('\\b'\+c\.toString\(a\)\+'\\b'\,'g'\),k\[c\]\);return p\}\('(.+?)',(\d+),(\d+),'(.+?)'\.split\('\|'\)\)\)",
                 html, re.DOTALL
             )
             if not eval_match:
-                print("[兵字秘·luluvdo] eval 块未找到")
+                print("[luluvdo] 完整正则失败，尝试直接搜索m3u8")
+                direct = re.search(r"(https?://[^\s<>]+\.m3u8[^\s<>]*)", html)
+                if direct:
+                    print("[luluvdo] 直接命中: " + direct.group(1)[:80])
+                    return direct.group(1)
                 return None
-
-            # 2. 提取参数
             p = eval_match.group(1)
             a = int(eval_match.group(2))
             c = int(eval_match.group(3))
-            k = eval_match.group(4).split('|')
-
-            # 3. 解码算法
+            k = eval_match.group(4).split("|")
+            print("[luluvdo] 参数 a=" + str(a) + " c=" + str(c) + " k=" + str(len(k)))
             def int_to_base(n, base):
-                digits = '0123456789abcdefghijklmnopqrstuvwxyz'
-                if n == 0:
-                    return '0'
-                result = ''
+                digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+                if n == 0: return "0"
+                result = ""
                 while n > 0:
                     result = digits[n % base] + result
                     n //= base
                 return result
-
+            decoded = p
             while c > 0:
                 c -= 1
                 if c < len(k) and k[c]:
-                    pattern = r'\b' + int_to_base(c, a) + r'\b'
-                    p = re.sub(pattern, lambda m, val=k[c]: val.replace('\\', '\\\\').replace('$', '\\$'), p)
-
-            # 4. 从解码后的代码中提取 m3u8 URL
-            m3u8_match = re.search(r'file:\s*["\'](https?://[^"\']+\.m3u8[^"\']*)["\']', p)
-            if m3u8_match:
-                url = m3u8_match.group(1)
-                print(f"[兵字秘·luluvdo] 命中 m3u8: {url[:80]}...")
-                return url
-            # 5. 回退：搜索任何 m3u8 链接
-            m3u8_match = re.search(r'(https?://[^"\']+\.m3u8[^"\']*)', p)
-            if m3u8_match:
-                return m3u8_match.group(1)
-
-            print("[兵字秘·luluvdo] 解码后未找到 m3u8")
+                    pattern = r"\b" + int_to_base(c, a) + r"\b"
+                    val = k[c]
+                    decoded = re.sub(pattern, lambda m, v=val: v.replace("\\", "\\\\").replace("$", "\\$"), decoded)
+            print("[luluvdo] 解码完成 len=" + str(len(decoded)))
+            m3u8 = re.search(r"file:\s*[^\w](https?://[^\s<>]+\.m3u8[^\s<>]*)[^\w]", decoded)
+            if m3u8:
+                print("[luluvdo] 命中m3u8: " + m3u8.group(1)[:80])
+                return m3u8.group(1)
+            m3u8 = re.search(r"(https?://[^\s<>]+\.m3u8[^\s<>]*)", decoded)
+            if m3u8:
+                print("[luluvdo] 回退命中m3u8: " + m3u8.group(1)[:80])
+                return m3u8.group(1)
+            mp4 = re.search(r"(https?://[^\s<>]+\.mp4[^\s<>]*)", decoded)
+            if mp4:
+                print("[luluvdo] 命中mp4: " + mp4.group(1)[:80])
+                return mp4.group(1)
+            print("[luluvdo] 未找到视频链接")
             return None
-
         except Exception as e:
-            print(f"[兵字秘·luluvdo] 解析异常: {e}")
+            print("[luluvdo] 异常: " + str(e))
+            import traceback
+            traceback.print_exc()
             return None
 
-    # ───────── DoodStream 专用解析 ─────────
+
     def _parse_doodstream(self, embed_url):
         try:
-            headers = {"Referer": self.siteUrl}
-            html = self.fetch(embed_url, headers=headers, referer=self.siteUrl)
+            print("[doodstream] 解析: " + str(embed_url))
+            site_url = getattr(self, 'siteUrl', "https://netfapx.net")
+            html = self.fetch(embed_url, headers={"Referer": site_url}, referer=site_url)
             if not html:
+                print("[doodstream] 下载失败")
                 return None
-
+            if "turnstile" in html.lower() or "captcha" in html.lower() or "cf-browser-verification" in html.lower():
+                print("[doodstream] 页面有验证码，无法自动解析")
+                return None
+            print("[doodstream] 下载成功 len=" + str(len(html)))
             token = None
-            for pattern in [
-                r'[?&]token=([a-z0-9]+)[&\'"]',
-                r'token\s*[:=]\s*["\']([a-z0-9]+)["\']',
-                r'"token"\s*:\s*"([a-z0-9]+)"',
-            ]:
-                m = re.search(pattern, html)
-                if m:
-                    token = m.group(1)
-                    break
-
+            token_match = re.search(r"token=([a-z0-9]+)", html)
+            if token_match:
+                token = token_match.group(1)
             if not token:
+                token_match = re.search(r"token\s*[:=]\s*([a-z0-9]+)", html)
+                if token_match:
+                    token = token_match.group(1)
+            if not token:
+                token_match = re.search(r'"token"\s*:\s*"([a-z0-9]+)"', html)
+                if token_match:
+                    token = token_match.group(1)
+            if token:
+                print("[doodstream] token=" + token)
+            else:
+                print("[doodstream] token未找到")
                 return None
-
             pass_md5 = None
-            for pattern in [
-                r'(/pass_md5[^\'"\\]+)',
-                r'["\'](/pass_md5[^"\']+)["\']',
-                r'(/pass_md5/[^\s<>"\']+)',
-            ]:
-                m = re.search(pattern, html)
-                if m:
-                    pass_md5 = re.sub(r'[^a-zA-Z0-9_/\-\.]', '', m.group(1))
-                    break
-
+            pass_match = re.search(r"/pass_md5[^\s<>]+", html)
+            if pass_match:
+                pass_md5 = pass_match.group(0)
             if not pass_md5:
+                pass_match = re.search(r"/pass_md5/[^\s<>]+", html)
+                if pass_match:
+                    pass_md5 = pass_match.group(0)
+            if pass_md5:
+                print("[doodstream] pass_md5=" + pass_md5)
+            else:
+                print("[doodstream] pass_md5未找到")
                 return None
-
-            domain = embed_url.split('/e/')[0] if '/e/' in embed_url else embed_url.rsplit('/', 2)[0]
+            domain = embed_url.split("/e/")[0] if "/e/" in embed_url else embed_url.rsplit("/", 2)[0]
             auth_url = domain + pass_md5
+            print("[doodstream] auth_url=" + auth_url)
             base_url = self.fetch(auth_url, headers={"Referer": embed_url}, referer=embed_url)
             if not base_url:
+                print("[doodstream] auth请求失败")
                 return None
-
             base_url = base_url.strip()
+            print("[doodstream] base_url=" + base_url[:80])
             if not base_url.startswith("http"):
+                print("[doodstream] base_url无效")
                 return None
-
-            random_str = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(10))
+            random_str = "".join(random.choice(string.ascii_letters + string.digits) for _ in range(10))
             expiry = int(time.time() * 1000)
-            return f"{base_url}{random_str}?token={token}&expiry={expiry}"
-
+            final_url = base_url + random_str + "?token=" + token + "&expiry=" + str(expiry)
+            print("[doodstream] 最终URL=" + final_url[:80])
+            return final_url
         except Exception as e:
-            print(f"[兵字秘·DoodStream] 解析异常: {e}")
+            print("[doodstream] 异常: " + str(e))
+            import traceback
+            traceback.print_exc()
             return None
 
-    # ───────── 通用嵌入页解析 ─────────
+
     def _parse_generic_embed(self, embed_url):
         try:
             headers = {"Referer": self.siteUrl}
@@ -826,33 +852,39 @@ class ZheTian_Master(YuanTianShu):
             return None
 
     def playerContent(self, flag, id, vipFlags):
-        if not id:
-            return {"parse": 1, "url": "", "header": ""}
+        try:
+            print("[playerContent] flag=" + str(flag) + " id=" + str(id)[:80])
+            if not id:
+                return {"parse": 1, "url": "", "header": "", "jx": 0}
+            if str(id).startswith("actor::"):
+                return {"parse": 1, "url": str(id).replace("actor::", ""), "header": "Referer=" + str(self.siteUrl), "jx": 0}
+            embed_signs = ["/e/", "/embed/", "/player/", "/stream/", "/v/"]
+            luluvdo_domains = getattr(self, 'luluvdo_domains', ["luluvdo.com", "lulustream.com", "lulucdn.com", "luluvid.com", "lulustream.net", "luluvid.net", "lulucdn.net"])
+            doodstream_domains = getattr(self, 'doodstream_domains', ["dood.to", "dood.so", "dood.watch", "doply.net"])
+            embed_domains = getattr(self, 'embed_domains', ["streamtape", "mixdrop"])
+            all_embed_domains = embed_domains + doodstream_domains + luluvdo_domains
+            is_embed = any(s in str(id) for s in embed_signs) or any(d in str(id).lower() for d in all_embed_domains)
+            print("[playerContent] is_embed=" + str(is_embed))
+            if is_embed:
+                print("[兵字秘] 嵌入页: " + str(id)[:60])
+                real_url = self._parse_embed_page(str(id))
+                print("[兵字秘] real_url=" + str(real_url is not None))
+                if real_url and any(d in str(id).lower() for d in luluvdo_domains):
+                    print("[兵字秘] luluvdo成功 parse=0")
+                    return {"parse": 0, "url": real_url, "header": "Referer=https://luluvdo.com", "jx": 0}
+                if real_url and self.isVideoFormat(real_url):
+                    print("[兵字秘] 预解析成功 parse=0")
+                    return {"parse": 0, "url": real_url, "header": "Referer=" + str(self.siteUrl), "jx": 0}
+                print("[兵字秘] 预解析失败 parse=1")
+                return {"parse": 1, "url": id, "header": "Referer=" + str(self.siteUrl), "jx": 1}
+            print("[playerContent] 非嵌入 parse=0")
+            return {"parse": 0, "url": id, "header": "Referer=" + str(self.siteUrl), "jx": 0}
+        except Exception as e:
+            print("[playerContent] 异常: " + str(e))
+            import traceback
+            traceback.print_exc()
+            return {"parse": 1, "url": id, "header": "Referer=" + str(getattr(self, 'siteUrl', 'https://netfapx.net')), "jx": 1}
 
-        if id.startswith("actor::"):
-            return {"parse": 1, "url": id.replace("actor::", ""), "header": f"Referer={self.siteUrl}"}
-
-        embed_signs = ["/e/", "/embed/", "/player/", "/stream/", "/v/"]
-        all_embed_domains = self.embed_domains + self.doodstream_domains + self.luluvdo_domains
-        is_embed = any(s in id for s in embed_signs) or any(d in id.lower() for d in all_embed_domains)
-
-        if is_embed:
-            print(f"[兵字秘] 嵌入播放器: {id[:60]}...")
-            real_url = self._parse_embed_page(id)
-            if real_url and self.isVideoFormat(real_url):
-                print(f"[兵字秘] 嵌入页预解析成功，直链播放")
-                return {"parse": 0, "url": real_url, "header": f"Referer={self.siteUrl}"}
-            print(f"[兵字秘] 嵌入页预解析失败，回退到JAR解析")
-            return {"parse": 1, "url": id, "header": f"Referer={self.siteUrl}"}
-
-        if "xhcdn.com" in id or "xhamster" in id:
-            cookies = "; ".join([f"{k}={v}" for k, v in self.session.cookies.items()])
-            header = f"Referer={self.siteUrl}"
-            if cookies:
-                header += f"&Cookie={cookies}"
-            return {"parse": 0, "url": id, "header": header}
-
-        return {"parse": 0, "url": id, "header": f"Referer={self.siteUrl}"}
 
     def searchContent(self, key, quick, pg="1"):
         try:
