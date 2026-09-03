@@ -1,30 +1,40 @@
 # -*- coding: utf-8 -*-
-import sys, json, base64, gzip, urllib.parse, threading, time, concurrent.futures
+import sys, json, base64, gzip, urllib.parse, threading, time, concurrent.futures, socket
+import hashlib
 import warnings
 warnings.filterwarnings("ignore")
 
 sys.path.append('..')
 try:
- from base.spider import Spider as _B
+    from base.spider import Spider as _B
 except ImportError:
- class _B: pass
+    class _B: pass
 try:
- import requests
+    import requests
 except ImportError:
- requests = None
+    requests = None
 
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
-# ==================== 配置 ====================
-API_DOMAIN = "https://api-al.yuytyr.online"
-IMG_DOMAIN = "https://images.yxdesign.art"
+# ==================== 配置（已更新为新域名）====================
+# 从 https://webal.quipa.website/ JS 源码提取的最新域名
+API_DOMAIN = "https://api-al.uio2.fun"
+IMG_DOMAIN = "https://images.uio2.fun"
 PROXY_PORT = 8899
+
+# 流媒体线路（优先新域名，保留旧存活线路作 fallback）
+STREAM_HOSTS = [
+    ("VIP高速1", "https://stream.uio2.fun"),      # 新域名
+    ("海外线路", "https://stream.ass6.store"),      # 旧域名中唯一存活
+]
 
 REQ_KEY = base64.b64decode("euZN1Gg3JIwWOEWhmE7C4l5dSSRU34fyuPMXjtuoqVs=")
 RESP_KEY = b"db6f7f9e5d7a770e0e3497a7d7a077f5"
+
+# 图片加密（旧密钥，如裂图需更换为新密钥）
 IMG_KEY = base64.b64decode("svOEKGb5WD0ezmHE4FXCVQ==")
 IMG_IV = base64.b64decode("4B7eYzHTevzHvgVZfWVNIg==")
 
@@ -38,405 +48,551 @@ X_INFO_LAUNCH = "eyJjcGFnZSI6ImxhdW5jaCIsInBsYXRmb3JtIjoyLCJwcGFnZSI6IiIsInZlcnN
 X_INFO_CENSOR = "eyJjcGFnZSI6ImNlbnNvciIsInBsYXRmb3JtIjoyLCJwcGFnZSI6ImxhdW5jaCIsInZlcnNpb24iOiIyLjQwIn0="
 X_INFO_PLAY = "eyJjcGFnZSI6InBsYXkiLCJwbGF0Zm9ybSI6MiwicHBhZ2UiOiJjZW5zb3IiLCJ2ZXJzaW9uIjoiMi40MCJ9"
 
-STREAM_HOSTS = [
- ("VIP高速3", "https://stream.yxdesign.art"),
- ("VIP高速1", "https://stream.lingqi.co"),
- ("VIP高速2", "https://stream-hua.hangbo.xyz"),
- ("海外线路", "https://stream.ass6.store"),
-]
-
 QUALITIES = [("480", "高清"), ("240", "标清")]
 # ==============================================
 
 _M3U8_CACHE = {}
 _CACHE_LOCK = threading.Lock()
 _SERVER_STARTED = False
+_LOG = []
+
+def _log(msg):
+    line = f"[Fulao2] {time.strftime('%H:%M:%S')} {msg}"
+    _LOG.append(line)
+    print(line)
+    if len(_LOG) > 500:
+        _LOG.pop(0)
+
 
 # ==================== 内置 HTTP 服务 ====================
 
 class _Handler(BaseHTTPRequestHandler):
- def log_message(self, fmt, *args):
-  pass
+    def log_message(self, fmt, *args):
+        pass
 
- def do_GET(self):
-  parsed = urllib.parse.urlparse(self.path)
-  qs = urllib.parse.parse_qs(parsed.query)
-  try:
-   if parsed.path == "/m3u8":
-    key = urllib.parse.unquote(qs.get("vid", [""])[0])
-    content = ""
-    for _ in range(40):
-     with _CACHE_LOCK:
-      content = _M3U8_CACHE.get(key, "")
-     if content:
-      break
-     time.sleep(0.5)
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        qs = urllib.parse.parse_qs(parsed.query)
+        try:
+            if parsed.path == "/m3u8":
+                key = urllib.parse.unquote(qs.get("vid", [""])[0])
+                content = ""
+                for _ in range(40):
+                    with _CACHE_LOCK:
+                        content = _M3U8_CACHE.get(key, "")
+                    if content:
+                        break
+                    time.sleep(0.5)
 
-    if content:
-     data = content.encode("utf-8")
-     self.send_response(200)
-     self.send_header("Content-Type", "application/vnd.apple.mpegurl")
-     self.send_header("Content-Length", str(len(data)))
-     self.send_header("Cache-Control", "no-cache")
-     self.end_headers()
-     self.wfile.write(data)
-    else:
-     self.send_response(404)
-     self.end_headers()
+                if content:
+                    data = content.encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/vnd.apple.mpegurl")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Cache-Control", "no-cache")
+                    self.end_headers()
+                    self.wfile.write(data)
+                else:
+                    self.send_response(404)
+                    self.end_headers()
 
-   elif parsed.path == "/img":
-    url = urllib.parse.unquote(qs.get("url", [""])[0])
-    r = requests.get(
-     url,
-     headers={
-      "User-Agent": UA_IMG,
-      "Accept-Encoding": "gzip",
-      "Connection": "Keep-Alive",
-     },
-     verify=False,
-     timeout=10,
-     allow_redirects=True,
-    )
-    raw = r.content
-    try:
-     body = unpad(AES.new(IMG_KEY, AES.MODE_CBC, IMG_IV).decrypt(raw), 16)
-    except Exception:
-     body = raw
-    self.send_response(200)
-    self.send_header("Content-Type", "image/jpeg")
-    self.send_header("Content-Length", str(len(body)))
-    self.end_headers()
-    self.wfile.write(body)
+            elif parsed.path == "/img":
+                url = urllib.parse.unquote(qs.get("url", [""])[0])
+                try:
+                    r = requests.get(
+                        url,
+                        headers={
+                            "User-Agent": UA_IMG,
+                            "Accept-Encoding": "gzip",
+                            "Connection": "Keep-Alive",
+                            "Referer": "https://webal.quipa.website/",
+                        },
+                        verify=False,
+                        timeout=10,
+                        allow_redirects=True,
+                    )
+                    raw = r.content
+                    try:
+                        body = unpad(AES.new(IMG_KEY, AES.MODE_CBC, IMG_IV).decrypt(raw), 16)
+                    except Exception:
+                        body = raw
+                    self.send_response(200)
+                    self.send_header("Content-Type", "image/jpeg")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                except Exception as e:
+                    _log(f"[img_proxy] 失败: {e}")
+                    self.send_response(502)
+                    self.end_headers()
 
-   else:
-    self.send_response(404)
-    self.end_headers()
+            else:
+                self.send_response(404)
+                self.end_headers()
 
-  except Exception:
-   try:
-    self.send_response(500)
-    self.end_headers()
-   except Exception:
-    pass
+        except Exception:
+            try:
+                self.send_response(500)
+                self.end_headers()
+            except Exception:
+                pass
+
 
 class _ThreadedServer(ThreadingMixIn, HTTPServer):
- daemon_threads = True
- allow_reuse_address = True
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def _find_available_port(start=PROXY_PORT, max_try=10):
+    for p in range(start, start + max_try):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.bind(("127.0.0.1", p))
+            s.close()
+            return p
+        except OSError:
+            continue
+    return start
+
 
 def _start_server():
- global _SERVER_STARTED
- if _SERVER_STARTED:
-  return
- try:
-  srv = _ThreadedServer(("127.0.0.1", PROXY_PORT), _Handler)
-  t = threading.Thread(target=srv.serve_forever)
-  t.daemon = True
-  t.start()
-  _SERVER_STARTED = True
-  print("[Fulao2] 代理服务已启动 127.0.0.1:" + str(PROXY_PORT))
- except Exception as e:
-  print("[Fulao2] 代理服务启动失败: " + str(e))
+    global _SERVER_STARTED, PROXY_PORT
+    if _SERVER_STARTED:
+        return
+    try:
+        PROXY_PORT = _find_available_port(PROXY_PORT)
+        srv = _ThreadedServer(("127.0.0.1", PROXY_PORT), _Handler)
+        t = threading.Thread(target=srv.serve_forever)
+        t.daemon = True
+        t.start()
+        _SERVER_STARTED = True
+        _log(f"代理服务已启动 127.0.0.1:{PROXY_PORT}")
+    except Exception as e:
+        _log(f"代理服务启动失败: {e}")
+
 
 # ==================== Spider ====================
 
 class Spider(_B):
 
- def init(self, e=""):
-  self.token = ""
-  self.sess = requests.Session()
-  self.sess.verify = False
-  self.sess.headers.update({
-   "user-agent": UA_APP,
-   "authorization": "Bearer ",
-   "accept-encoding": "gzip",
-   "x-info": X_INFO_LAUNCH,})
-  _start_server()
-  self._get_token()
+    def init(self, e=""):
+        self.token = ""
+        self.sess = requests.Session()
+        self.sess.verify = False
+        self.sess.headers.update({
+            "user-agent": UA_APP,
+            "authorization": "Bearer ",
+            "accept-encoding": "gzip",
+            "x-info": X_INFO_LAUNCH,
+        })
+        _start_server()
+        self._get_token()
 
- def getName(self):
-  return "Fulao2"
+    def getName(self):
+        return "Fulao2"
 
- def isVideoFormat(self, u):
-  return True
+    def isVideoFormat(self, u):
+        return True
 
- def manualVideoCheck(self):
-  return False
+    def manualVideoCheck(self):
+        return False
 
- # ==================== 加解密 ====================
+    # ==================== 加解密 ====================
 
- def _encrypt_payload(self, path):
-  payload = json.dumps({
-   "path": path,
-   "device_id": "aeffaaa7-166c-4545-8971-c669ff59f611",
-   "utm_medium": "",
-   "model": "LENOVOLenovo TB-J606F",
-   "universal_id": "3027776cc331ee45",
-   "platform": "Android",
-   "key": "f7787644a1f6b8e41a580fdfb4501acb9c095dda346567fa82a15c68a55b4ce1",
-   "timestamp": "1785928268",
-  }, separators=(',', ':'))
-  iv = base64.b64decode("B3nBQVSgjRuC09mgsdbgIg==")
-  ct = AES.new(REQ_KEY, AES.MODE_CBC, iv).encrypt(pad(payload.encode(), 16))
-  return base64.b64encode(iv).decode() + "." + base64.b64encode(ct).decode()
+    def _encrypt_payload(self, path):
+        payload = json.dumps({
+            "path": path,
+            "device_id": "aeffaaa7-166c-4545-8971-c669ff59f611",
+            "utm_medium": "",
+            "model": "LENOVOLenovo TB-J606F",
+            "universal_id": "3027776cc331ee45",
+            "platform": "Android",
+            "key": "f7787644a1f6b8e41a580fdfb4501acb9c095dda346567fa82a15c68a55b4ce1",
+            "timestamp": str(int(time.time())),
+        }, separators=(',', ':'))
+        iv = base64.b64decode("B3nBQVSgjRuC09mgsdbgIg==")
+        ct = AES.new(REQ_KEY, AES.MODE_CBC, iv).encrypt(pad(payload.encode(), 16))
+        return base64.b64encode(iv).decode() + "." + base64.b64encode(ct).decode()
 
- def _decrypt_resp(self, text):
-  try:
-   ct = base64.b64decode(text)
-   iv = bytes(a ^ b for a, b in zip(
-    AES.new(RESP_KEY, AES.MODE_ECB).decrypt(ct[:16]),
-    b'{"status":{"code'.ljust(16, b'\x00'),
-   ))
-   raw = unpad(AES.new(RESP_KEY, AES.MODE_CBC, iv).decrypt(ct), 16)
-   if raw[:2] == b'\x1f\x8b':
-    raw = gzip.decompress(raw)
-   return json.loads(raw.decode())
-  except Exception as e:
-   print("[decrypt_err] " + str(e))
-   return None
+    def _decrypt_resp(self, text):
+        try:
+            ct = base64.b64decode(text)
+            iv = bytes(a ^ b for a, b in zip(
+                AES.new(RESP_KEY, AES.MODE_ECB).decrypt(ct[:16]),
+                b'{\"status\":{\"code'.ljust(16, b'\x00'),
+            ))
+            raw = unpad(AES.new(RESP_KEY, AES.MODE_CBC, iv).decrypt(ct), 16)
+            if raw[:2] == b'\x1f\x8b':
+                raw = gzip.decompress(raw)
+            return json.loads(raw.decode())
+        except Exception as e:
+            # 如果解密失败，尝试直接作为明文JSON解析（新版可能不再加密）
+            try:
+                return json.loads(text)
+            except:
+                _log(f"[decrypt_err] {e}")
+                return None
 
- def _decrypt_m3u8(self, text):
-  try:
-   ct = base64.b64decode(text)
-   iv = bytes(a ^ b for a, b in zip(
-    AES.new(RESP_KEY, AES.MODE_ECB).decrypt(ct[:16]),
-    b'#EXTM3U\n#EXT-X-V',
-   ))
-   raw = unpad(AES.new(RESP_KEY, AES.MODE_CBC, iv).decrypt(ct), 16)
-   if raw[:2] == b'\x1f\x8b':
-    raw = gzip.decompress(raw)
-   return raw.decode('utf-8', errors='ignore')
-  except Exception as e:
-   print("[decrypt_m3u8_err] " + str(e))
-   return None
+    def _decrypt_m3u8(self, text):
+        try:
+            ct = base64.b64decode(text)
+            iv = bytes(a ^ b for a, b in zip(
+                AES.new(RESP_KEY, AES.MODE_ECB).decrypt(ct[:16]),
+                b'#EXTM3U\n#EXT-X-V',
+            ))
+            raw = unpad(AES.new(RESP_KEY, AES.MODE_CBC, iv).decrypt(ct), 16)
+            if raw[:2] == b'\x1f\x8b':
+                raw = gzip.decompress(raw)
+            return raw.decode('utf-8', errors='ignore')
+        except Exception as e:
+            # 如果解密失败，尝试直接作为明文m3u8返回
+            if text.strip().startswith("#EXTM3U"):
+                return text
+            _log(f"[decrypt_m3u8_err] {e}")
+            return None
 
- def _api(self, method, path, xinfo=None):
-  enc = self._encrypt_payload(path)
-  url = API_DOMAIN + "/" + path
-  h = {}
-  if xinfo:
-   h["x-info"] = xinfo
-  try:
-   if method == "POST":
-    h["content-type"] = "application/x-www-form-urlencoded"
-    r = self.sess.post(
-     url,
-     data="payload=" + urllib.parse.quote(enc),
-     headers=h,
-     timeout=15,
-    )
-   else:
-    r = self.sess.get(
-     url + "?payload=" + urllib.parse.quote(enc),
-     headers=h,
-     timeout=15,
-    )
-   if r.status_code == 200:
-    return self._decrypt_resp(r.text)
-   return None
-  except Exception as e:
-   print("[api_err] " + path + " " + str(e))
-   return None
+    def _api(self, method, path, xinfo=None):
+        enc = self._encrypt_payload(path)
+        url = API_DOMAIN + "/" + path
+        h = {}
+        if xinfo:
+            h["x-info"] = xinfo
+        try:
+            if method == "POST":
+                h["content-type"] = "application/x-www-form-urlencoded"
+                r = self.sess.post(
+                    url,
+                    data="payload=" + urllib.parse.quote(enc),
+                    headers=h,
+                    timeout=15,
+                )
+            else:
+                r = self.sess.get(
+                    url + "?payload=" + urllib.parse.quote(enc),
+                    headers=h,
+                    timeout=15,
+                )
+            if r.status_code == 200:
+                return self._decrypt_resp(r.text)
+            _log(f"[api] {path} 状态码={r.status_code}")
+            return None
+        except Exception as e:
+            _log(f"[api_err] {path} {e}")
+            return None
 
- # ==================== Token ====================
+    # ==================== Token ====================
 
- def _get_token(self):
-  data = self._api("POST", "v1/register/token")
-  if data and "response" in data:
-   resp = data["response"]
-   self.token = resp.get("token", resp.get("access_token", ""))
-   self.sess.headers["authorization"] = "Bearer " + self.token
+    def _get_token(self):
+        # 优先尝试旧接口 /v1/register/token
+        data = self._api("POST", "v1/register/token")
+        if data and "response" in data:
+            resp = data["response"]
+            self.token = resp.get("token", resp.get("access_token", ""))
+            self.sess.headers["authorization"] = "Bearer " + self.token
+            _log(f"Token获取成功(v1): {self.token[:20]}...")
+            return
 
- # ==================== 封面 ====================
+        # Fallback: 尝试新版 /v1/register/guest（需要hash，此处为占位）
+        _log("[token] v1/register/token 失败，尝试 guest 注册")
+        try:
+            guest_payload = {
+                "token": "",
+                "hash": hashlib.md5(f"aeffaaa7-166c-4545-8971-c669ff59f611{int(time.time())}".encode()).hexdigest()
+            }
+            r = self.sess.post(
+                API_DOMAIN + "/v1/register/guest",
+                json=guest_payload,
+                headers={"content-type": "application/json"},
+                timeout=10,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                if "response" in data:
+                    self.token = data["response"].get("token", "")
+                    self.sess.headers["authorization"] = "Bearer " + self.token
+                    _log(f"Token获取成功(guest): {self.token[:20]}...")
+                    return
+        except Exception as e:
+            _log(f"[token] guest 注册失败: {e}")
 
- def _img_url(self, path):
-  if not path:
-   return ""
-  if path.startswith("http"):
-   full = path
-  else:
-   full = IMG_DOMAIN + ("" if path.startswith("/") else "/") + path
-  return (
-   "http://127.0.0.1:" + str(PROXY_PORT)
-   + "/img?url=" + urllib.parse.quote(full, safe="")
-  )
+        _log("[token] 所有注册方式失败")
 
- # ==================== m3u8 获取 ====================
+    # ==================== 封面 ====================
 
- def _fetch_m3u8(self, vid, h_label, h_host, quality):
-  cache_key = vid + "_" + h_label + "_" + quality
-  with _CACHE_LOCK:
-   if cache_key in _M3U8_CACHE:
-    return cache_key
-  url = (
-   API_DOMAIN + "/v3/media/" + quality + "/" + vid
-   + ".m3u8?&token=" + self.token + "&h=" + h_host
-  )
-  try:
-   resp = self.sess.get(url, timeout=20, allow_redirects=True)
-   if resp.status_code != 200:
-    print("[fetch_m3u8] " + h_label + "-" + quality
-    + " 状态码=" + str(resp.status_code))
-    return None
-   text = self._decrypt_m3u8(resp.text)
-   if not text:
-    return None
-   with _CACHE_LOCK:
-    _M3U8_CACHE[cache_key] = text
-   print("[fetch_m3u8] " + h_label + "-" + quality + " OK")
-   return cache_key
-  except Exception as e:
-   print("[fetch_m3u8] " + h_label + "-" + quality + " " + str(e))
-   return None
+    def _img_url(self, path):
+        if not path:
+            return ""
+        if path.startswith("http"):
+            full = path
+        else:
+            full = IMG_DOMAIN + ("" if path.startswith("/") else "/") + path
+        return (
+            "http://127.0.0.1:" + str(PROXY_PORT)
+            + "/img?url=" + urllib.parse.quote(full, safe="")
+        )
 
- def _play_url(self, cache_key):
-  return (
-   "http://127.0.0.1:" + str(PROXY_PORT)
-   + "/m3u8?vid=" + urllib.parse.quote(cache_key, safe="")
-  )
+    # ==================== m3u8 获取 ====================
 
- # ==================== 首页分类 ====================
+    def _fetch_m3u8(self, vid, h_label, h_host, quality):
+        cache_key = vid + "_" + h_label + "_" + quality
+        with _CACHE_LOCK:
+            if cache_key in _M3U8_CACHE:
+                return cache_key
 
- def homeContent(self, filter=False):
-  data = self._api("GET", "v2/menu/type")
-  classes = []
-  if data and "response" in data:
-   seen = set()
-   for group in ["pixeled", "unpixeled"]:
-    for item in data["response"].get(group, []):
-     t = item.get("title", "")
-     if t in TARGET_CATEGORIES and t not in seen:
-      seen.add(t)
-      classes.append({
-       "type_id": str(item["id"]),
-       "type_name": t,
-      })
-  return {"class": classes, "filters": {}}
+        # 方式1: 旧格式（优先尝试）
+        url_old = (
+            API_DOMAIN + "/v3/media/" + quality + "/" + vid
+            + ".m3u8?&token=" + self.token + "&h=" + h_host
+        )
 
- def homeVideoContent(self):
-  return {"list": []}
+        for url in [url_old]:
+            try:
+                resp = self.sess.get(url, timeout=20, allow_redirects=True)
+                if resp.status_code != 200:
+                    continue
+                text = self._decrypt_m3u8(resp.text)
+                if not text:
+                    continue
+                with _CACHE_LOCK:
+                    _M3U8_CACHE[cache_key] = text
+                _log(f"[fetch_m3u8] {h_label}-{quality} OK")
+                return cache_key
+            except Exception as e:
+                _log(f"[fetch_m3u8] {h_label}-{quality} {e}")
+        return None
 
- # ==================== 分类列表 ====================
+    def _play_url(self, cache_key):
+        return (
+            "http://127.0.0.1:" + str(PROXY_PORT)
+            + "/m3u8?vid=" + urllib.parse.quote(cache_key, safe="")
+        )
 
- def categoryContent(self, tid, pg=1, filter=False, extend=None):
-  data = self._api("GET", "v1/menu/" + str(tid) + "/layout", xinfo=X_INFO_CENSOR)
-  videos = []
-  if data and "response" in data:
-   for layout in data["response"]:
-    items = layout.get("data", [])
-    if isinstance(items, dict):
-     items = [items]
-    if not isinstance(items, list):
-     continue
-    for v in items:
-     vid = v.get("video_id")
-     title = v.get("video_title", "")
-     if not vid or not title:
-      continue
-     raw_pic = v.get("cover") or v.get("thumb", "")
-     actor = v.get("actor", "")
-     if isinstance(actor, list):
-      actor = "、".join(actor)
-     videos.append({
-      "vod_id": str(vid),
-      "vod_name": title,
-      "vod_pic": self._img_url(raw_pic),
-      "vod_remarks": actor,
-     })
-  return {
-   "list": videos,
-   "page": pg,
-   "pagecount": 99,
-   "limit": len(videos) or 20,
-  }
+    # ==================== 首页分类 ====================
 
- # ==================== 视频详情 ====================
+    def homeContent(self, filter=False):
+        data = self._api("GET", "v2/menu/type")
+        classes = []
+        if data and "response" in data:
+            seen = set()
+            for group in ["pixeled", "unpixeled"]:
+                for item in data["response"].get(group, []):
+                    t = item.get("title", "")
+                    if t in TARGET_CATEGORIES and t not in seen:
+                        seen.add(t)
+                        classes.append({
+                            "type_id": str(item["id"]),
+                            "type_name": t,
+                        })
+        if not classes:
+            _log("[homeContent] API返回空分类，使用fallback")
+            classes = [
+                {"type_id": "1", "type_name": "推荐"},
+                {"type_id": "2", "type_name": "H动画"},
+                {"type_id": "3", "type_name": "最新"},
+                {"type_id": "4", "type_name": "抢先看"},
+                {"type_id": "5", "type_name": "中字"},
+                {"type_id": "6", "type_name": "NTR"},
+                {"type_id": "7", "type_name": "火爆"},
+                {"type_id": "8", "type_name": "FC2"},
+                {"type_id": "9", "type_name": "91大神"},
+                {"type_id": "10", "type_name": "传媒"},
+            ]
+        return {"class": classes, "filters": {}}
 
- def detailContent(self, ids):
-  vid = str(ids[0])
+    def homeVideoContent(self):
+        data = self._api("GET", "v1/menu/1/layout", xinfo=X_INFO_CENSOR)
+        videos = []
+        if data and "response" in data:
+            for layout in data["response"]:
+                items = layout.get("data", [])
+                if isinstance(items, dict):
+                    items = [items]
+                if not isinstance(items, list):
+                    continue
+                for v in items:
+                    vid = v.get("video_id")
+                    title = v.get("video_title", "")
+                    if not vid or not title:
+                        continue
+                    raw_pic = v.get("cover") or v.get("thumb", "")
+                    actor = v.get("actor", "")
+                    if isinstance(actor, list):
+                        actor = "、".join(actor)
+                    videos.append({
+                        "vod_id": str(vid),
+                        "vod_name": title,
+                        "vod_pic": self._img_url(raw_pic),
+                        "vod_remarks": actor,
+                    })
+                    if len(videos) >= 30:
+                        break
+                if len(videos) >= 30:
+                    break
+        return {"list": videos}
 
-  # 1. 获取元数据
-  info = self._api("GET", "v1/video/info/" + vid, xinfo=X_INFO_PLAY)
-  raw_pic = ""
-  title = ""
-  number = ""
-  desc = ""
-  actor = ""
-  tags = ""
-  if info and "response" in info:
-   r = info["response"]
-   raw_pic = r.get("cover_url") or r.get("cover") or r.get("thumb", "")
-   title = r.get("video_title", "")
-   number = r.get("video_number", "")
-   desc = r.get("video_description", "")
-   a = r.get("actor", [])
-   actor = "、".join(a) if isinstance(a, list) else str(a)
-   tg = r.get("video_tags", [])
-   tags = " ".join(tg) if isinstance(tg, list) else str(tg)
+    # ==================== 分类列表 ====================
 
-  # 2. 同步请求默认线路高清
-  default_label = STREAM_HOSTS[0][0]
-  default_host = STREAM_HOSTS[0][1]
-  default_key = self._fetch_m3u8(vid, default_label, default_host, "480")
-  if not default_key:
-   default_key = self._fetch_m3u8(vid, default_label, default_host, "240")
-  if not default_key:
-   print("[detail] 默认线路解析失败 vid=" + vid)
-   return {"list": []}
+    def categoryContent(self, tid, pg=1, filter=False, extend=None):
+        data = self._api("GET", "v1/menu/" + str(tid) + "/layout", xinfo=X_INFO_CENSOR)
+        videos = []
+        if data and "response" in data:
+            for layout in data["response"]:
+                items = layout.get("data", [])
+                if isinstance(items, dict):
+                    items = [items]
+                if not isinstance(items, list):
+                    continue
+                for v in items:
+                    vid = v.get("video_id")
+                    title = v.get("video_title", "")
+                    if not vid or not title:
+                        continue
+                    raw_pic = v.get("cover") or v.get("thumb", "")
+                    actor = v.get("actor", "")
+                    if isinstance(actor, list):
+                        actor = "、".join(actor)
+                    videos.append({
+                        "vod_id": str(vid),
+                        "vod_name": title,
+                        "vod_pic": self._img_url(raw_pic),
+                        "vod_remarks": actor,
+                    })
+        return {
+            "list": videos,
+            "page": pg,
+            "pagecount": 99,
+            "limit": len(videos) or 20,
+        }
 
-  # 3. 后台并发预热其余组合
-  def prefetch_all():
-   tasks = []
-   for hl, hh in STREAM_HOSTS:
-    for q, _ in QUALITIES:
-     ck = vid + "_" + hl + "_" + q
-     with _CACHE_LOCK:
-      if ck not in _M3U8_CACHE:
-       tasks.append((vid, hl, hh, q))
-   if not tasks:
-    return
-   with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
-    futs = [ex.submit(self._fetch_m3u8, *args) for args in tasks]
-    concurrent.futures.wait(futs)
+    # ==================== 视频详情 ====================
 
-  threading.Thread(target=prefetch_all, daemon=True).start()
+    def detailContent(self, ids):
+        vid = str(ids[0])
 
-  # 4. 构造播放列表，每个 key 指向自己的线路/清晰度
-  from_parts = []
-  url_groups = []
+        info = self._api("GET", "v1/video/info/" + vid, xinfo=X_INFO_PLAY)
+        raw_pic = ""
+        title = ""
+        number = ""
+        desc = ""
+        actor = ""
+        tags = ""
+        if info and "response" in info:
+            r = info["response"]
+            raw_pic = r.get("cover_url") or r.get("cover") or r.get("thumb", "")
+            title = r.get("video_title", "")
+            number = r.get("video_number", "")
+            desc = r.get("video_description", "")
+            a = r.get("actor", [])
+            actor = "、".join(a) if isinstance(a, list) else str(a)
+            tg = r.get("video_tags", [])
+            tags = " ".join(tg) if isinstance(tg, list) else str(tg)
+        else:
+            _log(f"[detailContent] 获取视频信息失败 vid={vid}")
 
-  for h_label, h_host in STREAM_HOSTS:
-   parts = []
-   for quality, q_label in QUALITIES:
-    ck = vid + "_" + h_label + "_" + quality
-    parts.append(q_label + "$" + self._play_url(ck))
-   from_parts.append(h_label)
-   url_groups.append("$$$".join(parts))
+        default_label = STREAM_HOSTS[0][0]
+        default_host = STREAM_HOSTS[0][1]
+        default_key = None
+        for q, _ in QUALITIES:
+            default_key = self._fetch_m3u8(vid, default_label, default_host, q)
+            if default_key:
+                break
 
-  return {"list": [{
-   "vod_id": vid,
-   "vod_name": title,
-   "vod_pic": self._img_url(raw_pic),
-   "vod_remarks": number,
-   "vod_content": desc or tags,
-   "vod_actor": actor,
-   "vod_play_from": "$$$".join(from_parts),
-   "vod_play_url": ":::".join(url_groups),
-  }]}
+        if not default_key:
+            for h_label, h_host in STREAM_HOSTS[1:]:
+                for q, _ in QUALITIES:
+                    default_key = self._fetch_m3u8(vid, h_label, h_host, q)
+                    if default_key:
+                        default_label = h_label
+                        default_host = h_host
+                        break
+                if default_key:
+                    break
 
- # ==================== 播放 ====================
+        if not default_key:
+            _log(f"[detail] 所有线路解析失败 vid={vid}")
+            return {"list": []}
 
- def playerContent(self, flag, id, vipFlags=None):
-  return {
-   "parse": 0,
-   "url": id,
-   "header": json.dumps({
-    "User-Agent": UA_CDN,
-    "Cookie": "jwt=token",
-   }),
-  }
+        def prefetch_all():
+            tasks = []
+            for hl, hh in STREAM_HOSTS:
+                for q, _ in QUALITIES:
+                    ck = vid + "_" + hl + "_" + q
+                    with _CACHE_LOCK:
+                        if ck not in _M3U8_CACHE:
+                            tasks.append((vid, hl, hh, q))
+            if not tasks:
+                return
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+                futs = [ex.submit(self._fetch_m3u8, *args) for args in tasks]
+                concurrent.futures.wait(futs)
 
- def localProxy(self, param):
-  pass
+        threading.Thread(target=prefetch_all, daemon=True).start()
 
- def searchContent(self, key, quick=False, pg=1):
-  return {"list": []}
+        from_parts = []
+        url_groups = []
+
+        for h_label, h_host in STREAM_HOSTS:
+            parts = []
+            for quality, q_label in QUALITIES:
+                ck = vid + "_" + h_label + "_" + quality
+                parts.append(q_label + "$" + self._play_url(ck))
+            from_parts.append(h_label)
+            url_groups.append("$$$".join(parts))
+
+        return {"list": [{
+            "vod_id": vid,
+            "vod_name": title,
+            "vod_pic": self._img_url(raw_pic),
+            "vod_remarks": number,
+            "vod_content": desc or tags,
+            "vod_actor": actor,
+            "vod_play_from": "$$$".join(from_parts),
+            "vod_play_url": ":::".join(url_groups),
+        }]}
+
+    # ==================== 播放 ====================
+
+    def playerContent(self, flag, id, vipFlags=None):
+        return {
+            "parse": 0,
+            "url": id,
+            "header": json.dumps({
+                "User-Agent": UA_CDN,
+                "Cookie": "jwt=token",
+            }),
+        }
+
+    def localProxy(self, param):
+        pass
+
+    def searchContent(self, key, quick=False, pg=1):
+        enc_key = urllib.parse.quote(key)
+        data = self._api("GET", f"v1/search?q={enc_key}&page={pg}", xinfo=X_INFO_CENSOR)
+        videos = []
+        if data and "response" in data:
+            items = data["response"].get("data", [])
+            if isinstance(items, dict):
+                items = [items]
+            if not isinstance(items, list):
+                items = []
+            for v in items:
+                vid = v.get("video_id")
+                title = v.get("video_title", "")
+                if not vid or not title:
+                    continue
+                raw_pic = v.get("cover") or v.get("thumb", "")
+                actor = v.get("actor", "")
+                if isinstance(actor, list):
+                    actor = "、".join(actor)
+                videos.append({
+                    "vod_id": str(vid),
+                    "vod_name": title,
+                    "vod_pic": self._img_url(raw_pic),
+                    "vod_remarks": actor,
+                })
+        return {
+            "list": videos,
+            "page": pg,
+            "pagecount": 99,
+            "limit": len(videos) or 20,
+        }
