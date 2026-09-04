@@ -53,7 +53,7 @@ _SERVER_STARTED = False
 _LOG = []
 
 def _log(msg):
-    line = f"[Fulao2] {time.strftime('%H:%M:%S')} {msg}"
+    line = "[Fulao2] %s %s" % (time.strftime("%H:%M:%S"), msg)
     _LOG.append(line)
     try:
         sys.stdout.write(line + "\n")
@@ -127,8 +127,6 @@ def _rewrite_m3u8_urls(m3u8_text, base_url):
         if not line_stripped:
             result.append(line)
             continue
-
-        # 处理带URI的标签
         if line_stripped.startswith("#EXT-X-KEY") or line_stripped.startswith("#EXT-X-SESSION-KEY"):
             def rk(m):
                 abs_uri = _abs_url(m.group(1), base_url)
@@ -137,7 +135,6 @@ def _rewrite_m3u8_urls(m3u8_text, base_url):
             line = re.sub(r'URI="([^"]+)"', rk, line)
             result.append(line)
             continue
-
         if line_stripped.startswith("#EXT-X-MAP"):
             def rm(m):
                 abs_uri = _abs_url(m.group(1), base_url)
@@ -146,7 +143,6 @@ def _rewrite_m3u8_urls(m3u8_text, base_url):
             line = re.sub(r'URI="([^"]+)"', rm, line)
             result.append(line)
             continue
-
         if line_stripped.startswith("#EXT-X-MEDIA"):
             def rmed(m):
                 abs_uri = _abs_url(m.group(1), base_url)
@@ -155,7 +151,6 @@ def _rewrite_m3u8_urls(m3u8_text, base_url):
             line = re.sub(r'URI="([^"]+)"', rmed, line)
             result.append(line)
             continue
-
         if line_stripped.startswith("#EXT-X-I-FRAME-STREAM-INF"):
             def rifr(m):
                 abs_uri = _abs_url(m.group(1), base_url)
@@ -164,8 +159,6 @@ def _rewrite_m3u8_urls(m3u8_text, base_url):
             line = re.sub(r'URI="([^"]+)"', rifr, line)
             result.append(line)
             continue
-
-        # 处理非注释行
         if not line_stripped.startswith("#"):
             abs_url = _abs_url(line_stripped, base_url)
             if abs_url:
@@ -175,7 +168,6 @@ def _rewrite_m3u8_urls(m3u8_text, base_url):
             else:
                 result.append(line)
             continue
-
         result.append(line)
     return "\n".join(result)
 
@@ -192,7 +184,7 @@ def _get_spider_token():
     return ""
 
 
-# ==================== HTTP 服务 ====================
+# ==================== HTTP 服务（v9：增加HEAD支持）====================
 
 class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
@@ -200,13 +192,59 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "*")
 
     def do_OPTIONS(self):
         self.send_response(200)
         self._cors()
         self.end_headers()
+
+    def do_HEAD(self):
+        """v9核心修复：TVBox播放器会发送HEAD预检请求"""
+        parsed = urllib.parse.urlparse(self.path)
+        qs = urllib.parse.parse_qs(parsed.query)
+        try:
+            if parsed.path == "/m3u8":
+                cdn_url = urllib.parse.unquote(qs.get("url", [""])[0])
+                vid_key = urllib.parse.unquote(qs.get("vid", [""])[0])
+                if cdn_url or vid_key:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/vnd.apple.mpegurl")
+                    self.send_header("Connection", "close")
+                    self._cors()
+                    self.end_headers()
+                else:
+                    self.send_response(400)
+                    self.end_headers()
+            elif parsed.path == "/ts":
+                cdn_url = urllib.parse.unquote(qs.get("url", [""])[0])
+                if cdn_url:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "video/mp2t")
+                    self.send_header("Connection", "close")
+                    self._cors()
+                    self.end_headers()
+                else:
+                    self.send_response(400)
+                    self.end_headers()
+            elif parsed.path == "/img":
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Connection", "close")
+                self.end_headers()
+            elif parsed.path == "/health":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Connection", "close")
+                self.end_headers()
+            else:
+                self.send_response(404)
+                self.end_headers()
+        except Exception as e:
+            _log("[proxy_HEAD] ERR %s:%s" % (type(e).__name__, e))
+            self.send_response(500)
+            self.end_headers()
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -218,11 +256,13 @@ class _Handler(BaseHTTPRequestHandler):
                 self._do_ts(qs)
             elif parsed.path == "/img":
                 self._do_img(qs)
+            elif parsed.path == "/health":
+                self._do_health(qs)
             else:
                 self.send_response(404)
                 self.end_headers()
         except Exception as e:
-            _log("[proxy] ERR %s:%s" % (type(e).__name__, e))
+            _log("[proxy_GET] ERR %s:%s" % (type(e).__name__, e))
             self.send_response(500)
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
@@ -242,8 +282,36 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _do_m3u8(self, qs):
         cdn_url = urllib.parse.unquote(qs.get("url", [""])[0])
+        vid_key = urllib.parse.unquote(qs.get("vid", [""])[0])
+
+        # 模式1: 从缓存读取
+        if vid_key and not cdn_url:
+            content = ""
+            for _ in range(40):
+                with _CACHE_LOCK:
+                    content = _M3U8_CACHE.get(vid_key, "")
+                if content:
+                    break
+                time.sleep(0.5)
+            if content:
+                data = content.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/vnd.apple.mpegurl")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "close")
+                self._cors()
+                self.end_headers()
+                self.wfile.write(data)
+                _log("[proxy_m3u8] 缓存命中 vid=%s" % vid_key)
+                return
+            else:
+                self._err_m3u8("Cache miss: %s" % vid_key)
+                return
+
+        # 模式2: 实时请求CDN
         if not cdn_url:
-            self._err_m3u8("Missing URL")
+            self._err_m3u8("Missing URL and VID")
             return
 
         _log("[proxy_m3u8] CDN=%s" % cdn_url[:100])
@@ -366,6 +434,15 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_response(502)
             self.end_headers()
 
+    def _do_health(self, qs):
+        data = b"OK"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(data)
+
 
 class _ThreadedServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
@@ -415,7 +492,7 @@ class Spider(_B):
             "x-info": X_INFO_LAUNCH,
         })
         _start_server()
-        _log("[init] 源初始化完成")
+        _log("[init] 源初始化完成 代理端口=%d" % PROXY_PORT)
 
     def getName(self):
         return "Fulao2"
