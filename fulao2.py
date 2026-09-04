@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+# Fulao2 TVBox 爬虫 - 遮天九秘 v14 诊断版
+# 新增：备用线路、请求头日志、Token强制刷新、错误回显
+
 import sys, json, base64, gzip, urllib.parse, threading, time, socket, re
 import hashlib
 import warnings
@@ -26,7 +29,7 @@ PROXY_PORT = 8899
 
 STREAM_HOSTS = [
     ("VIP高速1", "https://stream.uio2.fun"),
-    ("海外线路", "https://stream.ass6.store"),
+    ("海外线路", "https://stream.ass6.store"),   # 备用线路
 ]
 
 REQ_KEY = base64.b64decode("euZN1Gg3JIwWOEWhmE7C4l5dSSRU34fyuPMXjtuoqVs=")
@@ -51,6 +54,44 @@ _M3U8_CACHE = {}
 _CACHE_LOCK = threading.Lock()
 _SERVER_STARTED = False
 _LOG = []
+
+# ==================== 全局 Token ====================
+_global_token = ""
+_global_token_lock = threading.Lock()
+_spider_instance = None
+
+def set_global_token(tok):
+    global _global_token
+    with _global_token_lock:
+        _global_token = tok
+
+def get_global_token():
+    with _global_token_lock:
+        return _global_token
+
+def refresh_global_token():
+    """强制通过 Spider 刷新 Token"""
+    global _spider_instance
+    if _spider_instance is not None:
+        try:
+            # 清除旧Token，强制重新获取
+            _spider_instance.token = ""
+            if _spider_instance._get_token():
+                return True
+        except Exception as e:
+            _log("[refresh_token] 异常: %s" % e)
+    else:
+        _log("[refresh_token] Spider实例未注册")
+    return False
+
+def ensure_global_token():
+    """确保 Token 有效，若无效则刷新"""
+    tok = get_global_token()
+    if not tok:
+        _log("[ensure_token] Token为空，强制刷新")
+        return refresh_global_token()
+    return True
+# ==============================================
 
 def _log(msg):
     line = "[Fulao2] %s %s" % (time.strftime("%H:%M:%S"), msg)
@@ -172,19 +213,7 @@ def _rewrite_m3u8_urls(m3u8_text, base_url):
     return "\n".join(result)
 
 
-def _get_spider_token():
-    try:
-        import gc
-        for obj in gc.get_objects():
-            if hasattr(obj, '__class__') and obj.__class__.__name__ == 'Spider':
-                if hasattr(obj, 'token') and obj.token:
-                    return obj.token
-    except Exception:
-        pass
-    return ""
-
-
-# ==================== HTTP 服务（v9：增加HEAD支持）====================
+# ==================== 代理 HTTP 服务 ====================
 
 class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
@@ -201,7 +230,6 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_HEAD(self):
-        """v9核心修复：TVBox播放器会发送HEAD预检请求"""
         parsed = urllib.parse.urlparse(self.path)
         qs = urllib.parse.parse_qs(parsed.query)
         try:
@@ -269,6 +297,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(str(e).encode())
 
     def _err_m3u8(self, msg):
+        # 将错误信息写入 m3u8 注释，某些播放器可显示
         err = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.0,\nhttp://127.0.0.1/error?msg=%s\n#EXT-X-ENDLIST\n" % urllib.parse.quote(msg)
         data = err.encode("utf-8")
         self.send_response(200)
@@ -280,11 +309,37 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _make_cdn_headers(self, extra=None):
+        """确保 Token 有效并构造头部"""
+        # 强制刷新 Token（每次请求前刷新，确保最新）
+        refresh_global_token()
+        tok = get_global_token()
+        headers = {
+            "User-Agent": UA_CDN,
+            "Accept": "*/*",
+            "Accept-Encoding": "identity",
+            "Connection": "keep-alive",
+        }
+        try:
+            api_host = urllib.parse.urlparse(API_DOMAIN).netloc
+            headers["Referer"] = "https://" + api_host + "/"
+            headers["Origin"] = "https://" + api_host
+        except Exception:
+            pass
+        if tok:
+            headers["Cookie"] = "jwt=%s" % tok
+            headers["Authorization"] = "Bearer %s" % tok
+        else:
+            _log("[make_headers] ⚠️ Token 为空")
+        if extra:
+            headers.update(extra)
+        return headers
+
     def _do_m3u8(self, qs):
         cdn_url = urllib.parse.unquote(qs.get("url", [""])[0])
         vid_key = urllib.parse.unquote(qs.get("vid", [""])[0])
 
-        # 模式1: 从缓存读取
+        # 缓存模式
         if vid_key and not cdn_url:
             content = ""
             for _ in range(40):
@@ -309,68 +364,100 @@ class _Handler(BaseHTTPRequestHandler):
                 self._err_m3u8("Cache miss: %s" % vid_key)
                 return
 
-        # 模式2: 实时请求CDN
         if not cdn_url:
-            self._err_m3u8("Missing URL and VID")
+            self._err_m3u8("Missing URL")
             return
 
-        _log("[proxy_m3u8] CDN=%s" % cdn_url[:100])
+        _log("[proxy_m3u8] 请求CDN: %s" % cdn_url[:120])
 
-        headers = {
-            "Referer": "https://webal.quipa.website/",
-            "Origin": "https://webal.quipa.website",
-            "User-Agent": UA_CDN,
-            "Accept": "*/*",
-            "Accept-Encoding": "identity",
-        }
-        if not _has_signature(cdn_url):
-            tok = _get_spider_token()
-            if tok:
-                headers["Cookie"] = "jwt=%s" % tok
-                _log("[proxy_m3u8] +jwt")
+        # 尝试主线路，若403则自动切换备用线路
+        hosts_to_try = STREAM_HOSTS  # 列表
+        for idx, (label, host) in enumerate(hosts_to_try):
+            # 如果CDN URL已经包含host，则直接用，否则替换host
+            # 注意：cdn_url可能来自API，已经包含完整域名，但我们可能需要将域名替换为备用
+            # 简单做法：尝试用备用host替换原host
+            if idx == 0:
+                target_url = cdn_url  # 第一次用原样
+            else:
+                # 将cdn_url中的第一个域名替换为备用host
+                # 提取原host
+                parsed = urllib.parse.urlparse(cdn_url)
+                # 替换netloc为备用host
+                new_parsed = parsed._replace(netloc=urllib.parse.urlparse(host).netloc)
+                target_url = urllib.parse.urlunparse(new_parsed)
+                _log("[proxy_m3u8] 尝试备用线路: %s" % target_url[:120])
 
-        try:
-            resp = requests.get(cdn_url, headers=headers, timeout=20, verify=False, allow_redirects=True)
-            preview = resp.text[:60].replace(chr(10), "\n").replace(chr(13), "")
-            _log("[proxy_m3u8] status=%d len=%d preview=%s" % (resp.status_code, len(resp.content), preview))
+            headers = self._make_cdn_headers()
+            headers["x-info"] = X_INFO_PLAY
 
-            if resp.status_code != 200:
-                self._err_m3u8("CDN_%d" % resp.status_code)
-                return
+            # 打印脱敏头部（仅显示前几位）
+            safe_headers = {k: (v[:10]+"..." if k in ("Cookie","Authorization") else v) for k,v in headers.items()}
+            _log("[proxy_m3u8] Headers: %s" % json.dumps(safe_headers, ensure_ascii=False))
 
-            text = _decrypt_m3u8_data(resp.text)
-            if text:
-                text = _rewrite_m3u8_urls(text, cdn_url)
-                data = text.encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/vnd.apple.mpegurl")
-                self.send_header("Content-Length", str(len(data)))
-                self.send_header("Cache-Control", "no-cache")
-                self.send_header("Connection", "close")
-                self._cors()
-                self.end_headers()
-                self.wfile.write(data)
-                _log("[proxy_m3u8] OK decrypted=%d" % len(data))
-                return
+            try:
+                resp = requests.get(target_url, headers=headers, timeout=20, verify=False, allow_redirects=True)
+                preview = resp.text[:100].replace(chr(10), " ").replace(chr(13), " ")
+                _log("[proxy_m3u8] 线路%s状态=%d len=%d preview=%s" % (label, resp.status_code, len(resp.content), preview))
 
-            if resp.text.strip().startswith("#EXTM3U"):
-                text = _rewrite_m3u8_urls(resp.text, cdn_url)
-                data = text.encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/vnd.apple.mpegurl")
-                self.send_header("Content-Length", str(len(data)))
-                self.send_header("Cache-Control", "no-cache")
-                self.send_header("Connection", "close")
-                self._cors()
-                self.end_headers()
-                self.wfile.write(data)
-                _log("[proxy_m3u8] OK raw=%d" % len(data))
-                return
+                if resp.status_code in (401, 403):
+                    _log("[proxy_m3u8] 认证失败，尝试刷新Token并重试")
+                    if refresh_global_token():
+                        # 重试一次当前线路
+                        headers = self._make_cdn_headers()
+                        headers["x-info"] = X_INFO_PLAY
+                        resp2 = requests.get(target_url, headers=headers, timeout=20, verify=False)
+                        if resp2.status_code == 200:
+                            resp = resp2
+                        else:
+                            _log("[proxy_m3u8] 刷新后仍失败")
+                            continue  # 尝试下一条线路
+                    else:
+                        continue
 
-            self._err_m3u8("BadContent:%s" % preview[:30])
-        except Exception as e:
-            _log("[proxy_m3u8] EXC %s:%s" % (type(e).__name__, e))
-            self._err_m3u8("EXC_%s" % type(e).__name__)
+                if resp.status_code != 200:
+                    _log("[proxy_m3u8] 线路%s 失败，状态码 %d" % (label, resp.status_code))
+                    continue  # 尝试下一条线路
+
+                # 成功 -> 解密/重写
+                text = _decrypt_m3u8_data(resp.text)
+                if text:
+                    text = _rewrite_m3u8_urls(text, target_url)
+                    data = text.encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/vnd.apple.mpegurl")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Connection", "close")
+                    self._cors()
+                    self.end_headers()
+                    self.wfile.write(data)
+                    _log("[proxy_m3u8] ✅ 成功 (线路%s)" % label)
+                    return
+
+                if resp.text.strip().startswith("#EXTM3U"):
+                    text = _rewrite_m3u8_urls(resp.text, target_url)
+                    data = text.encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/vnd.apple.mpegurl")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_header("Connection", "close")
+                    self._cors()
+                    self.end_headers()
+                    self.wfile.write(data)
+                    _log("[proxy_m3u8] ✅ 成功 (原始m3u8) 线路%s" % label)
+                    return
+
+                _log("[proxy_m3u8] 无效内容，尝试下一条线路")
+                continue
+
+            except Exception as e:
+                _log("[proxy_m3u8] 异常 %s:%s" % (type(e).__name__, e))
+                continue
+
+        # 所有线路均失败
+        self._err_m3u8("AllLinesFailed_403")
+        _log("[proxy_m3u8] ❌ 所有线路均失败")
 
     def _do_ts(self, qs):
         cdn_url = urllib.parse.unquote(qs.get("url", [""])[0])
@@ -379,24 +466,14 @@ class _Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        headers = {
-            "Referer": "https://webal.quipa.website/",
-            "Origin": "https://webal.quipa.website",
-            "User-Agent": UA_CDN,
-            "Accept": "*/*",
-        }
-        if not _has_signature(cdn_url):
-            tok = _get_spider_token()
-            if tok:
-                headers["Cookie"] = "jwt=%s" % tok
-
+        headers = self._make_cdn_headers()
         rng = self.headers.get("Range", "")
         if rng:
             headers["Range"] = rng
 
         try:
             resp = requests.get(cdn_url, headers=headers, timeout=20, verify=False, allow_redirects=True, stream=True)
-            _log("[proxy_ts] status=%d url=%s" % (resp.status_code, cdn_url[:70]))
+            _log("[proxy_ts] status=%d url=%s" % (resp.status_code, cdn_url[:80]))
             self.send_response(resp.status_code)
             for k, v in resp.headers.items():
                 kl = k.lower()
@@ -417,7 +494,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _do_img(self, qs):
         url = urllib.parse.unquote(qs.get("url", [""])[0])
         try:
-            r = requests.get(url, headers={"User-Agent": UA_IMG, "Accept-Encoding": "gzip", "Connection": "Keep-Alive", "Referer": "https://webal.quipa.website/"}, verify=False, timeout=10, allow_redirects=True)
+            r = requests.get(url, headers={"User-Agent": UA_IMG, "Accept-Encoding": "gzip", "Connection": "Keep-Alive"}, verify=False, timeout=10, allow_redirects=True)
             raw = r.content
             try:
                 body = unpad(AES.new(IMG_KEY, AES.MODE_CBC, IMG_IV).decrypt(raw), 16)
@@ -491,6 +568,8 @@ class Spider(_B):
             "accept-encoding": "gzip",
             "x-info": X_INFO_LAUNCH,
         })
+        global _spider_instance
+        _spider_instance = self
         _start_server()
         _log("[init] 源初始化完成 代理端口=%d" % PROXY_PORT)
 
@@ -585,6 +664,7 @@ class Spider(_B):
                 self.token = resp.get("token", resp.get("access_token", ""))
                 if self.token:
                     self.sess.headers["authorization"] = "Bearer " + self.token
+                    set_global_token(self.token)
                     _log("[token] 旧接口成功 token=%s..." % self.token[:15])
                     return True
         except Exception as e:
@@ -593,7 +673,7 @@ class Spider(_B):
 
         for attempt in range(3):
             try:
-                r1 = self.sess.get(API_DOMAIN + "/v1/verify/code", headers={"Referer": "https://webal.quipa.website/", "Origin": "https://webal.quipa.website"}, timeout=8)
+                r1 = self.sess.get(API_DOMAIN + "/v1/verify/code", timeout=8)
                 if r1.status_code != 200:
                     diag.append("vc=%d" % r1.status_code)
                     time.sleep(1)
@@ -604,7 +684,7 @@ class Spider(_B):
                     time.sleep(1)
                     continue
                 enc = self._encrypt_payload("v1/register/guest", {"hash": hash_val})
-                r2 = self.sess.post(API_DOMAIN + "/v1/register/guest", data="payload=" + urllib.parse.quote(enc), headers={"Content-Type": "application/x-www-form-urlencoded", "Referer": "https://webal.quipa.website/", "Origin": "https://webal.quipa.website"}, timeout=8)
+                r2 = self.sess.post(API_DOMAIN + "/v1/register/guest", data="payload=" + urllib.parse.quote(enc), headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=8)
                 if r2.status_code != 200:
                     diag.append("rg=%d" % r2.status_code)
                     time.sleep(1)
@@ -620,6 +700,7 @@ class Spider(_B):
                         self.token = old_data["response"].get("token", "")
                         if self.token:
                             self.sess.headers["authorization"] = "Bearer " + self.token
+                            set_global_token(self.token)
                             _log("[token] 旧解密成功")
                             return True
                     diag.append("old_decrypt_fail")
@@ -634,6 +715,7 @@ class Spider(_B):
                     self.token = guest_data["response"].get("token", "")
                     if self.token:
                         self.sess.headers["authorization"] = "Bearer " + self.token
+                        set_global_token(self.token)
                         _log("[token] Guest成功 token=%s..." % self.token[:15])
                         return True
                     diag.append("token_empty")
@@ -662,22 +744,30 @@ class Spider(_B):
         if not direct_url:
             return None, "NOURL"
         url = _abs_url(direct_url, h_host)
-        has_sig = _has_signature(url)
+
         headers = {
-            "Referer": "https://webal.quipa.website/",
-            "Origin": "https://webal.quipa.website",
             "User-Agent": UA_CDN,
             "Accept": "*/*",
             "Accept-Encoding": "identity",
+            "Connection": "keep-alive",
         }
+        try:
+            api_host = urllib.parse.urlparse(API_DOMAIN).netloc
+            headers["Referer"] = "https://" + api_host + "/"
+            headers["Origin"] = "https://" + api_host
+        except Exception:
+            pass
+        tok = get_global_token()
+        if tok:
+            headers["Cookie"] = "jwt=%s" % tok
+            headers["Authorization"] = "Bearer %s" % tok
         if xinfo:
             headers["x-info"] = xinfo
-        if self.token and not has_sig:
-            headers["Cookie"] = "jwt=%s" % self.token
+
         _log("[_fetch_m3u8] 预加载: %s" % url[:90])
         try:
             resp = self.sess.get(url, headers=headers, timeout=20, allow_redirects=True)
-            preview = resp.text[:60].replace(chr(10), "\n").replace(chr(13), "")
+            preview = resp.text[:100].replace(chr(10), " ").replace(chr(13), " ")
             _log("[_fetch_m3u8] status=%d len=%d preview=%s" % (resp.status_code, len(resp.content), preview))
             if resp.status_code == 200:
                 text = _decrypt_m3u8_data(resp.text)
@@ -870,10 +960,17 @@ class Spider(_B):
     def playerContent(self, flag, id, vipFlags=None):
         if id.startswith("http://127.0.0.1"):
             return {"parse": 0, "url": id, "header": ""}
-        has_sig = _has_signature(id)
-        header_dict = {"User-Agent": UA_CDN, "Referer": "https://webal.quipa.website/", "Origin": "https://webal.quipa.website"}
-        if self.token and not has_sig:
-            header_dict["Cookie"] = "jwt=%s" % self.token
+        header_dict = {"User-Agent": UA_CDN}
+        try:
+            api_host = urllib.parse.urlparse(API_DOMAIN).netloc
+            header_dict["Referer"] = "https://" + api_host + "/"
+            header_dict["Origin"] = "https://" + api_host
+        except Exception:
+            pass
+        tok = get_global_token()
+        if tok:
+            header_dict["Cookie"] = "jwt=%s" % tok
+            header_dict["Authorization"] = "Bearer %s" % tok
         return {"parse": 0, "url": id, "header": json.dumps(header_dict, ensure_ascii=False), "ua": header_dict.get("User-Agent", ""), "referer": header_dict.get("Referer", "")}
 
     def localProxy(self, param):
