@@ -1,4 +1,4 @@
-# 蜜桃视频 T3 类型爬虫 (修复verify=False导致的T3请求异常)
+# 蜜桃视频 T3 类型爬虫 (极速诊断版)
 # 网站: https://www.nht966hht.vip:9527
 
 # coding=utf-8
@@ -27,7 +27,7 @@ except Exception:
     except Exception:
         AES = None
 
-TIMEOUT = 8
+TIMEOUT = 5
 
 SITES = [
     {'name': 'nht966', 'host': 'https://www.nht966hht.vip:9527'},
@@ -67,7 +67,7 @@ class Spider(Spider):
         self._video_type_list = []
         self._session_cache = None
         self._session_cache_ttl = 1800
-        self._last_err = ''
+        self._diag_msgs = []
 
     def getName(self):
         return "蜜桃视频"
@@ -77,6 +77,11 @@ class Spider(Spider):
 
     def manualVideoCheck(self):
         return False
+
+    def _diag(self, msg):
+        self._diag_msgs.append(str(msg)[:80])
+        if len(self._diag_msgs) > 5:
+            self._diag_msgs.pop(0)
 
     def _get_cached_site(self):
         try:
@@ -94,8 +99,8 @@ class Spider(Spider):
             pass
 
     def _resolve_host(self, portal):
+        # 先尝试 HTTPS
         try:
-            # 关键修复: 去掉 verify=False，和 nww2.py 保持一致
             r = requests.get(portal, headers=self.headers, timeout=TIMEOUT)
             text = r.text or ''
             if 'targetSites' in text:
@@ -108,7 +113,23 @@ class Spider(Spider):
             if r.status_code == 200:
                 return portal.rstrip('/')
         except Exception as e:
-            self._last_err = 'resolve:' + str(e)[:60]
+            self._diag('https_err:' + str(e)[:40])
+        # 降级 HTTP
+        try:
+            http_portal = portal.replace('https://', 'http://')
+            r = requests.get(http_portal, headers=self.headers, timeout=TIMEOUT)
+            text = r.text or ''
+            if 'targetSites' in text:
+                m = re.search(r'targetSites\s*=\s*\[(.*?)\]', text, re.S)
+                if m:
+                    urls = re.findall(r'https?://[^\s"\',\]]+', m.group(1))
+                    if urls:
+                        return urls[0].rstrip('/')
+                return ''
+            if r.status_code == 200:
+                return http_portal.rstrip('/')
+        except Exception as e:
+            self._diag('http_err:' + str(e)[:40])
         return ''
 
     def _select_best_site(self):
@@ -255,7 +276,6 @@ class Spider(Spider):
             headers['Content-Type'] = 'text/plain'
             headers['encrypt'] = 'true'
         try:
-            # 关键修复: 去掉 verify=False
             r = self.session.post(api_url, data=body.encode('utf-8'),
                                   headers=headers, timeout=TIMEOUT)
             resp = r.json()
@@ -267,7 +287,7 @@ class Spider(Spider):
                     pass
             return resp
         except Exception as e:
-            self._last_err = 'api:' + str(e)[:60]
+            self._diag('api_err:' + str(e)[:40])
             return None
 
     def _ensure_session(self):
@@ -301,6 +321,11 @@ class Spider(Spider):
                 self._device_id = data['deviceId']
             if data.get('typeTitleList'):
                 self._categories = data['typeTitleList']
+            else:
+                self._diag('no_typeTitleList')
+        else:
+            code = resp1.get('code') if resp1 else 'None'
+            self._diag('initH5_1_code=' + str(code))
         self._api_request('/ht/users/initH5_2', _t=shared_t)
         resp = self._api_request('/ht/users/deviceLogin', {
             'bundleId': BUNDLE_ID,
@@ -311,6 +336,9 @@ class Spider(Spider):
             data = resp.get('data', {})
             self._user_id = data.get('userId', '')
             self._session_id = data.get('sessionId', '')
+        else:
+            code = resp.get('code') if resp else 'None'
+            self._diag('login_code=' + str(code))
         self._session_inited = True
         self._save_session_cache()
         return True
@@ -355,61 +383,71 @@ class Spider(Spider):
                 {'type_id': 'actor', 'type_name': '女优'},
                 {'type_id': 'topic', 'type_name': '专题'},
             ]
-        else:
-            for cat in self._categories:
-                cid = str(cat.get('contentId', ''))
-                title = cat.get('title', '')
-                if not cid or not title or title in self._CATEGORY_BLACKLIST:
-                    continue
-                classes.append({'type_id': cid, 'type_name': title})
-                cat_filters = []
-                sub_cats = [v for v in self._video_type_list if str(v.get('typePid', '')) == cid]
-                if sub_cats:
-                    sub_values = [{'n': '全部', 'v': ''}]
-                    for sc in sub_cats:
-                        sc_id = str(sc.get('typeId', ''))
-                        sc_name = sc.get('typeName', '')
-                        if sc_id and sc_name:
-                            sub_values.append({'n': sc_name, 'v': sc_id})
-                    if len(sub_values) > 1:
-                        cat_filters.append({'key': 'label', 'name': '分类', 'value': sub_values})
-                first_level = [v for v in self._video_type_list
-                               if str(v.get('typePid', '')) == '0' and str(v.get('typeId', '')) == cid]
-                if first_level:
-                    tags_str = first_level[0].get('tags', '')
-                    if tags_str:
-                        tag_list = [t.strip() for t in tags_str.split(',') if t.strip()]
-                        if tag_list:
-                            tag_values = [{'n': '全部', 'v': ''}]
-                            for t in tag_list:
-                                tag_values.append({'n': t, 'v': t})
-                            cat_filters.append({'key': 'tag', 'name': '标签', 'value': tag_values})
-                cat_filters.append({'key': 'sort', 'name': '排序', 'value': [
-                    {'n': '最近更新', 'v': '0'},
-                    {'n': '最多播放', 'v': '1'},
-                    {'n': '最多收藏', 'v': '2'},
-                ]})
-                if cat_filters:
-                    filters[cid] = cat_filters
+            diag_text = ' | '.join(self._diag_msgs) if self._diag_msgs else '网络不通或域名被墙'
+            return {
+                'class': classes,
+                'filters': {},
+                'list': [{
+                    'vod_id': 'diag',
+                    'vod_name': diag_text[:80],
+                    'vod_pic': '',
+                    'vod_remarks': '请开代理/VPN测试',
+                }],
+            }
 
-            classes.append({'type_id': 'actor', 'type_name': '女优'})
-            actors_filters = []
-            actors_filters.append({'key': 'height', 'name': '身高', 'value': [
-                {'n': '身高', 'v': ''},
-            ] + [{'n': f'{h}cm', 'v': str(h)} for h in range(150, 165)]})
-            actors_filters.append({'key': 'cup', 'name': '罩杯', 'value': [
-                {'n': '罩杯', 'v': ''},
-            ] + [{'n': f'{c}罩杯', 'v': c} for c in 'ABCDEFG']})
-            actors_filters.append({'key': 'birthday', 'name': '年龄', 'value': [
-                {'n': '年龄', 'v': ''},
-            ] + [{'n': f'{y}年', 'v': str(y)} for y in range(2002, 1975, -1)]})
-            actors_filters.append({'key': 'debut', 'name': '出道', 'value': [
-                {'n': '出道', 'v': ''},
-            ] + [{'n': f'{y}年', 'v': str(y)} for y in range(2025, 2000, -1)]})
-            filters['actor'] = actors_filters
-            classes.append({'type_id': 'topic', 'type_name': '专题'})
+        for cat in self._categories:
+            cid = str(cat.get('contentId', ''))
+            title = cat.get('title', '')
+            if not cid or not title or title in self._CATEGORY_BLACKLIST:
+                continue
+            classes.append({'type_id': cid, 'type_name': title})
+            cat_filters = []
+            sub_cats = [v for v in self._video_type_list if str(v.get('typePid', '')) == cid]
+            if sub_cats:
+                sub_values = [{'n': '全部', 'v': ''}]
+                for sc in sub_cats:
+                    sc_id = str(sc.get('typeId', ''))
+                    sc_name = sc.get('typeName', '')
+                    if sc_id and sc_name:
+                        sub_values.append({'n': sc_name, 'v': sc_id})
+                if len(sub_values) > 1:
+                    cat_filters.append({'key': 'label', 'name': '分类', 'value': sub_values})
+            first_level = [v for v in self._video_type_list
+                           if str(v.get('typePid', '')) == '0' and str(v.get('typeId', '')) == cid]
+            if first_level:
+                tags_str = first_level[0].get('tags', '')
+                if tags_str:
+                    tag_list = [t.strip() for t in tags_str.split(',') if t.strip()]
+                    if tag_list:
+                        tag_values = [{'n': '全部', 'v': ''}]
+                        for t in tag_list:
+                            tag_values.append({'n': t, 'v': t})
+                        cat_filters.append({'key': 'tag', 'name': '标签', 'value': tag_values})
+            cat_filters.append({'key': 'sort', 'name': '排序', 'value': [
+                {'n': '最近更新', 'v': '0'},
+                {'n': '最多播放', 'v': '1'},
+                {'n': '最多收藏', 'v': '2'},
+            ]})
+            if cat_filters:
+                filters[cid] = cat_filters
 
-        # 修复: homeContent 不再预加载视频，避免超长等待
+        classes.append({'type_id': 'actor', 'type_name': '女优'})
+        actors_filters = []
+        actors_filters.append({'key': 'height', 'name': '身高', 'value': [
+            {'n': '身高', 'v': ''},
+        ] + [{'n': f'{h}cm', 'v': str(h)} for h in range(150, 165)]})
+        actors_filters.append({'key': 'cup', 'name': '罩杯', 'value': [
+            {'n': '罩杯', 'v': ''},
+        ] + [{'n': f'{c}罩杯', 'v': c} for c in 'ABCDEFG']})
+        actors_filters.append({'key': 'birthday', 'name': '年龄', 'value': [
+            {'n': '年龄', 'v': ''},
+        ] + [{'n': f'{y}年', 'v': str(y)} for y in range(2002, 1975, -1)]})
+        actors_filters.append({'key': 'debut', 'name': '出道', 'value': [
+            {'n': '出道', 'v': ''},
+        ] + [{'n': f'{y}年', 'v': str(y)} for y in range(2025, 2000, -1)]})
+        filters['actor'] = actors_filters
+        classes.append({'type_id': 'topic', 'type_name': '专题'})
+
         return {
             'class': classes,
             'filters': filters,
