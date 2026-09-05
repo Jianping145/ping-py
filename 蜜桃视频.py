@@ -1,4 +1,4 @@
-# 蜜桃视频 T3 类型爬虫
+# 蜜桃视频 T3 类型爬虫 (T3 兼容版)
 # 网站: https://www.nht966hht.vip:9527
 # API: AES-128-CBC (ZeroPadding) + MD5 签名加密
 
@@ -69,11 +69,12 @@ class Spider(BaseSpider):
         "deviceType": "H5-android",
     }
 
-    # 测速缓存
-    _speed_cache_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.mitao_cache.json')
-    _speed_cache_ttl = 1800
+    # T3 兼容：内存缓存替代文件缓存（Android 无写权限 / __file__ 异常）
     _lock = threading.Lock()
     _speed_test_done = False
+    _cached_host = ''
+    _cached_ts = 0
+    _speed_cache_ttl = 1800
 
     # 会话状态
     _user_id = ''
@@ -87,30 +88,29 @@ class Spider(BaseSpider):
     # 视频类型列表 (从 appConfig videoTypeList，用于构建筛选)
     _video_type_list = []
 
-    # 会话缓存（避免重复 deviceLogin 触发 429 限流）
-    _session_cache_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.mitao_session.json')
-    _session_cache_ttl = 1800  # 30 分钟
+    # 会话内存缓存（替代文件缓存，避免 T3 无写权限导致崩溃）
+    _session_cache = None
+    _session_cache_ttl = 1800
 
     # ============================================================
-    # 多站点测速
+    # 多站点测速 (内存缓存版)
     # ============================================================
     def _get_cached_site(self):
+        """从内存缓存获取站点"""
         try:
-            if os.path.exists(self._speed_cache_file):
-                with open(self._speed_cache_file, 'r') as f:
-                    data = json.loads(f.read())
-                age = time.time() - data.get('ts', 0)
-                host = data.get('host', '')
-                if age < self._speed_cache_ttl and host:
-                    return host, True
+            with self._lock:
+                if self._cached_host and (time.time() - self._cached_ts) < self._speed_cache_ttl:
+                    return self._cached_host, True
         except Exception:
             pass
         return '', False
 
     def _save_cached_site(self, host):
+        """保存站点到内存缓存"""
         try:
-            with open(self._speed_cache_file, 'w') as f:
-                f.write(json.dumps({'host': host, 'ts': time.time()}))
+            with self._lock:
+                self._cached_host = host
+                self._cached_ts = time.time()
         except Exception:
             pass
 
@@ -130,7 +130,7 @@ class Spider(BaseSpider):
             if 'targetSites' in text:
                 m = re.search(r'targetSites\s*=\s*\[(.*?)\]', text, re.S)
                 if m:
-                    urls = re.findall(r'https?://[^\s"\',\]]+', m.group(1))
+                    urls = re.findall(r'https?://[^\s"',\]]+', m.group(1))
                     if urls:
                         return urls[0].rstrip('/')
                 return ''
@@ -166,12 +166,12 @@ class Spider(BaseSpider):
             self._save_cached_site(resolved)
 
     # ============================================================
-    # 会话缓存（持久化到文件，避免重复 init 触发 429 限流）
+    # 会话缓存（内存版，避免 T3 文件写权限问题）
     # ============================================================
     def _save_session_cache(self):
-        """将会话状态写入缓存文件"""
+        """将会话状态保存到内存"""
         try:
-            data = {
+            self._session_cache = {
                 'ts': time.time(),
                 'user_id': self._user_id,
                 'session_id': self._session_id,
@@ -179,26 +179,22 @@ class Spider(BaseSpider):
                 'categories': self._categories,
                 'video_type_list': self._video_type_list,
             }
-            with open(self._session_cache_file, 'w') as f:
-                f.write(json.dumps(data, ensure_ascii=False))
         except Exception:
             pass
 
     def _load_session_cache(self):
-        """从缓存文件恢复会话状态，返回 True 表示缓存有效"""
+        """从内存恢复会话状态，返回 True 表示缓存有效"""
         try:
-            if not os.path.exists(self._session_cache_file):
+            if self._session_cache is None:
                 return False
-            with open(self._session_cache_file, 'r') as f:
-                data = json.loads(f.read())
-            age = time.time() - data.get('ts', 0)
+            age = time.time() - self._session_cache.get('ts', 0)
             if age >= self._session_cache_ttl:
                 return False
-            self._user_id = data.get('user_id', '')
-            self._session_id = data.get('session_id', '')
-            self._device_id = data.get('device_id', '')
-            self._categories = data.get('categories', [])
-            self._video_type_list = data.get('video_type_list', [])
+            self._user_id = self._session_cache.get('user_id', '')
+            self._session_id = self._session_cache.get('session_id', '')
+            self._device_id = self._session_cache.get('device_id', '')
+            self._categories = self._session_cache.get('categories', [])
+            self._video_type_list = self._session_cache.get('video_type_list', [])
             # 关键字段缺失视为缓存无效, 避免无认证请求被服务器拒绝
             if not self._user_id or not self._session_id:
                 return False
@@ -364,14 +360,14 @@ class Spider(BaseSpider):
     # ============================================================
     def _ensure_session(self):
         """
-        初始化会话: 优先从文件缓存恢复 → 否则 appConfig → 生成 deviceId → initH5_1 → initH5_2 → deviceLogin
+        初始化会话: 优先从内存缓存恢复 → 否则 appConfig → 生成 deviceId → initH5_1 → initH5_2 → deviceLogin
         真实浏览器流程: appConfig 最先调，initH5_1/2 共用同一个 t 时间戳
         缓存策略: 避免 T3 新建实例时重复 deviceLogin 触发 429 限流
         """
         if self._session_inited:
             return
 
-        # 优先从缓存恢复（跳过整个 init 流程，避免 429）
+        # 优先从内存缓存恢复（跳过整个 init 流程，避免 429）
         if self._load_session_cache():
             self._session_inited = True
             # 旧缓存可能没有 video_type_list，补一次 appConfig 请求
