@@ -1,5 +1,6 @@
-# 蜜桃视频 T3 分层诊断版
-# 用于确认 T3 环境是否能正常执行代码逻辑
+# 蜜桃视频 T3 类型爬虫 (参照nww2.py框架重写)
+# 网站: https://www.nht966hht.vip:9527
+# API: AES-128-CBC (ZeroPadding) + MD5 签名加密
 
 # coding=utf-8
 # !/usr/bin/python
@@ -7,7 +8,7 @@
 import sys
 sys.path.append('..')
 
-from base.spider import BaseSpider
+from base.spider import Spider
 import requests
 import json
 import base64
@@ -42,20 +43,31 @@ PROJECT_ID = '1'
 PROXY_TYPE = 'mitao_img'
 
 
-def _ok_page(vlist, classes, filters=None):
-    return {
-        'class': classes,
-        'filters': filters or {},
-        'type': '影视',
-        'list': vlist,
-        'page': 1,
-        'pagecount': 1,
-        'limit': len(vlist),
-        'total': len(vlist),
-    }
+class Spider(Spider):
 
-
-class Spider(BaseSpider):
+    def __init__(self):
+        super().__init__()
+        self.session = requests.Session()
+        self.host = SITES[0]['host']
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+            "lang": "cn",
+            "deviceType": "H5-android",
+        }
+        self._speed_test_done = False
+        self._cached_host = ''
+        self._cached_ts = 0
+        self._speed_cache_ttl = 1800
+        self._user_id = ''
+        self._session_id = ''
+        self._device_id = ''
+        self._session_inited = False
+        self._categories = []
+        self._video_type_list = []
+        self._session_cache = None
+        self._session_cache_ttl = 1800
 
     def getName(self):
         return "蜜桃视频"
@@ -66,30 +78,9 @@ class Spider(BaseSpider):
     def manualVideoCheck(self):
         return False
 
-    filterable = True
-    searchable = True
-    host = SITES[0]['host']
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "zh-CN,zh;q=0.9",
-        "lang": "cn",
-        "deviceType": "H5-android",
-    }
-
-    _speed_test_done = False
-    _cached_host = ''
-    _cached_ts = 0
-    _speed_cache_ttl = 1800
-    _user_id = ''
-    _session_id = ''
-    _device_id = ''
-    _session_inited = False
-    _categories = []
-    _video_type_list = []
-    _session_cache = None
-    _session_cache_ttl = 1800
-
+    # ============================================================
+    # 多站点测速
+    # ============================================================
     def _get_cached_site(self):
         try:
             if self._cached_host and (time.time() - self._cached_ts) < self._speed_cache_ttl:
@@ -141,6 +132,9 @@ class Spider(BaseSpider):
         if resolved:
             self._save_cached_site(resolved)
 
+    # ============================================================
+    # 会话缓存
+    # ============================================================
     def _save_session_cache(self):
         try:
             self._session_cache = {
@@ -172,6 +166,9 @@ class Spider(BaseSpider):
         except Exception:
             return False
 
+    # ============================================================
+    # AES
+    # ============================================================
     @staticmethod
     def _zero_pad(data, block_size=16):
         pad_len = block_size - (len(data) % block_size)
@@ -266,8 +263,8 @@ class Spider(BaseSpider):
             headers['Content-Type'] = 'text/plain'
             headers['encrypt'] = 'true'
         try:
-            r = requests.post(api_url, data=body.encode('utf-8'),
-                              headers=headers, timeout=TIMEOUT, verify=False)
+            r = self.session.post(api_url, data=body.encode('utf-8'),
+                                  headers=headers, timeout=TIMEOUT, verify=False)
             resp = r.json()
             if resp.get('code') == 10000 and isinstance(resp.get('data'), str) and resp['data']:
                 try:
@@ -347,36 +344,31 @@ class Spider(BaseSpider):
         if valid:
             self.host = cached_host
             self._speed_test_done = True
+        return True
 
     # ============================================================
-    # 首页: 分层诊断，先不请求视频，只显示分类
+    # 首页
     # ============================================================
+    _CATEGORY_BLACKLIST = {'成人游戏', '漫画', '小说', '蜜穴女友', '一键脱衣', '春药商城', '同城交友', '吃瓜', '成人漫画', '女优', '专题'}
+
     def homeContent(self, filter):
-        try:
-            self._select_best_site()
-            self._ensure_session()
+        self._select_best_site()
+        self._ensure_session()
 
-            # 如果 _categories 为空，给一个默认分类，避免T3空白
-            if not self._categories:
-                classes = [
-                    {'type_id': 'home', 'type_name': '首页'},
-                    {'type_id': 'actor', 'type_name': '女优'},
-                    {'type_id': 'topic', 'type_name': '专题'},
-                ]
-                return _ok_page([{
-                    'vod_id': 'diag',
-                    'vod_name': '分类获取失败，点击看详情',
-                    'vod_pic': '',
-                    'vod_remarks': '可能网络/DNS问题',
-                }], classes)
+        classes = []
+        filters = {}
 
-            classes = []
-            filters = {}
-            blacklist = {'成人游戏', '漫画', '小说', '蜜穴女友', '一键脱衣', '春药商城', '同城交友', '吃瓜', '成人漫画', '女优', '专题'}
+        if not self._categories:
+            classes = [
+                {'type_id': 'home', 'type_name': '首页'},
+                {'type_id': 'actor', 'type_name': '女优'},
+                {'type_id': 'topic', 'type_name': '专题'},
+            ]
+        else:
             for cat in self._categories:
                 cid = str(cat.get('contentId', ''))
                 title = cat.get('title', '')
-                if not cid or not title or title in blacklist:
+                if not cid or not title or title in self._CATEGORY_BLACKLIST:
                     continue
                 classes.append({'type_id': cid, 'type_name': title})
                 cat_filters = []
@@ -426,21 +418,12 @@ class Spider(BaseSpider):
             filters['actor'] = actors_filters
             classes.append({'type_id': 'topic', 'type_name': '专题'})
 
-            # 首页不再调用 categoryContent，直接返回一个提示条目
-            return _ok_page([{
-                'vod_id': 'diag',
-                'vod_name': '分类加载成功，请点击下方分类浏览',
-                'vod_pic': '',
-                'vod_remarks': '如点击后空白则是网络问题',
-            }], classes, filters)
-        except Exception as e:
-            import traceback
-            return _ok_page([{
-                'vod_id': 'error',
-                'vod_name': 'homeContent异常:' + str(e)[:80],
-                'vod_pic': '',
-                'vod_remarks': '请反馈此错误',
-            }], [{'type_id': 'home', 'type_name': '首页'}])
+        home_videos = self.categoryContent('home', 1, '', {})
+        return {
+            'class': classes,
+            'filters': filters,
+            'list': home_videos.get('list', []),
+        }
 
     def homeVideoContent(self, tid, pg, filter, extend):
         return self.categoryContent(tid or 'home', pg, filter, extend)
@@ -449,20 +432,9 @@ class Spider(BaseSpider):
     # 分类列表
     # ============================================================
     def categoryContent(self, tid, pg, filter, extend):
-        try:
-            return self._categoryContent_impl(tid, pg, filter, extend)
-        except Exception as e:
-            import traceback
-            return _ok_page([{
-                'vod_id': 'cat_err',
-                'vod_name': 'category异常:' + str(e)[:80],
-                'vod_pic': '',
-                'vod_remarks': traceback.format_exc().replace('\n', ' ')[:100],
-            }], [{'type_id': tid, 'type_name': str(tid)}])
-
-    def _categoryContent_impl(self, tid, pg, filter, extend):
         tid = str(tid)
-        pg = int(pg)
+        pg = int(pg) if str(pg).isdigit() else 1
+
         self._select_best_site()
         self._ensure_session()
         vod_list = []
@@ -491,14 +463,12 @@ class Spider(BaseSpider):
                         'type': '1',
                     })
                 if not resp or resp.get('code') != 10000:
-                    return _ok_page([], [])
+                    return {'list': [], 'page': pg, 'pagecount': 1, 'limit': 0, 'total': 0}
                 data = resp.get('data', {})
                 vod_list = self._extract_videos_from_data(data)
                 total_page = int(data.get('totalPage') or data.get('total_page') or 1)
-                return {
-                    'list': vod_list, 'page': pg, 'pagecount': max(total_page, 1),
-                    'limit': len(vod_list), 'total': max(total_page, 1) * 20,
-                }
+                return {'list': vod_list, 'page': pg, 'pagecount': max(total_page, 1),
+                        'limit': len(vod_list), 'total': max(total_page, 1) * 20}
             elif real_tid.startswith('topic_'):
                 topic_id = real_tid[len('topic_'):]
                 resp = self._api_request('/ht/content/queryOriTopicVideos', {
@@ -507,16 +477,14 @@ class Spider(BaseSpider):
                     'pageSize': '20',
                 })
                 if not resp or resp.get('code') != 10000:
-                    return _ok_page([], [])
+                    return {'list': [], 'page': pg, 'pagecount': 1, 'limit': 0, 'total': 0}
                 data = resp.get('data', {})
                 vod_list = self._extract_videos_from_data(data)
                 total_page = int(data.get('totalPage') or data.get('total_page') or 1)
-                return {
-                    'list': vod_list, 'page': pg, 'pagecount': max(total_page, 1),
-                    'limit': len(vod_list), 'total': max(total_page, 1) * 20,
-                }
+                return {'list': vod_list, 'page': pg, 'pagecount': max(total_page, 1),
+                        'limit': len(vod_list), 'total': max(total_page, 1) * 20}
             else:
-                return _ok_page([], [])
+                return {'list': [], 'page': pg, 'pagecount': 1, 'limit': 0, 'total': 0}
 
         if tid == 'actor':
             api_params = {'pageNo': str(pg - 1), 'pageSize': '20'}
@@ -528,7 +496,7 @@ class Spider(BaseSpider):
                         api_params[ak] = val
             resp = self._api_request('/ht/content/getActors', api_params)
             if not resp or resp.get('code') != 10000:
-                return _ok_page([], [])
+                return {'list': [], 'page': pg, 'pagecount': 1, 'limit': 0, 'total': 0}
             data = resp.get('data', {})
             vod_list = self._parse_actor_list(data)
             total_page = int(data.get('totalPage') or 1)
@@ -540,7 +508,7 @@ class Spider(BaseSpider):
                 'pageNo': str(pg - 1), 'pageSize': '20',
             })
             if not resp or resp.get('code') != 10000:
-                return _ok_page([], [])
+                return {'list': [], 'page': pg, 'pagecount': 1, 'limit': 0, 'total': 0}
             data = resp.get('data', {})
             vod_list = self._parse_topic_list(data)
             return {'list': vod_list, 'page': pg, 'pagecount': 50,
@@ -555,7 +523,7 @@ class Spider(BaseSpider):
                 'type': '1',
             })
             if not resp or resp.get('code') != 10000:
-                return _ok_page([], [])
+                return {'list': [], 'page': pg, 'pagecount': 1, 'limit': 0, 'total': 0}
             data = resp.get('data', {})
             items = (data.get('typeVideoList') or data.get('list') or data.get('data') or data.get('videoList') or [])
             if isinstance(items, list):
@@ -577,7 +545,7 @@ class Spider(BaseSpider):
                         api_params[key] = val
             resp = self._api_request('/ht/content/queryTypeVideosH5', api_params)
             if not resp or resp.get('code') != 10000:
-                return _ok_page([], [])
+                return {'list': [], 'page': pg, 'pagecount': 1, 'limit': 0, 'total': 0}
             data = resp.get('data', {})
             items = (data.get('typeVideoList') or data.get('list') or data.get('data') or data.get('videoList') or [])
             if isinstance(items, list):
@@ -623,7 +591,8 @@ class Spider(BaseSpider):
         elif not isinstance(data, dict):
             return []
         else:
-            items = (data.get('actorList') or data.get('actors') or data.get('list') or data.get('data') or [])
+            items = (data.get('actorList') or data.get('actors') or data.get('list')
+                     or data.get('data') or [])
         if not isinstance(items, list):
             return []
         results = []
@@ -703,18 +672,6 @@ class Spider(BaseSpider):
         }
 
     def detailContent(self, ids):
-        try:
-            return self._detailContent_impl(ids)
-        except Exception as e:
-            import traceback
-            return _ok_page([{
-                'vod_id': 'det_err',
-                'vod_name': 'detail异常:' + str(e)[:80],
-                'vod_pic': '',
-                'vod_remarks': traceback.format_exc().replace('\n', ' ')[:100],
-            }], [])
-
-    def _detailContent_impl(self, ids):
         did = ids[0] if isinstance(ids, list) else ids
         self._select_best_site()
         self._ensure_session()
@@ -725,13 +682,18 @@ class Spider(BaseSpider):
         if not detail:
             return {'list': []}
         vd = detail.get('videoDetail') or {}
-        title = (vd.get('title') or detail.get('title') or detail.get('name') or detail.get('videoTitle') or '未知标题')
+        title = (vd.get('title') or detail.get('title') or detail.get('name') or
+                 detail.get('videoTitle') or '未知标题')
         pic = (vd.get('img') or vd.get('cover') or vd.get('coverUrl') or
-               detail.get('img') or detail.get('cover') or detail.get('coverUrl') or detail.get('imageUrl') or '')
-        desc = (vd.get('description') or vd.get('desc') or detail.get('description') or detail.get('desc') or detail.get('intro') or '')
+               detail.get('img') or detail.get('cover') or
+               detail.get('coverUrl') or detail.get('imageUrl') or '')
+        desc = (vd.get('description') or vd.get('desc') or
+                detail.get('description') or detail.get('desc') or detail.get('intro') or '')
         duration = vd.get('duration') or detail.get('duration', 0)
-        actor = (vd.get('author') or vd.get('actor') or vd.get('actors') or detail.get('actor') or detail.get('actors') or '')
-        play_url = (detail.get('playUrl') or detail.get('videoUrl') or detail.get('downUrl') or detail.get('url') or
+        actor = (vd.get('author') or vd.get('actor') or vd.get('actors') or
+                 detail.get('actor') or detail.get('actors') or '')
+        play_url = (detail.get('playUrl') or detail.get('videoUrl') or
+                    detail.get('downUrl') or detail.get('url') or
                     detail.get('m3u8Url') or detail.get('sl') or '')
         vod_play_url = '播放$' + str(did)
         if play_url:
@@ -751,40 +713,33 @@ class Spider(BaseSpider):
             'type': 'video',
         }]}
 
-    def searchContent(self, key, quick, pg=1):
-        try:
-            return self._searchContent_impl(key, quick, pg)
-        except Exception as e:
-            import traceback
-            return _ok_page([{
-                'vod_id': 'src_err',
-                'vod_name': 'search异常:' + str(e)[:80],
-                'vod_pic': '',
-                'vod_remarks': traceback.format_exc().replace('\n', ' ')[:100],
-            }], [])
-
-    def _searchContent_impl(self, key, quick, pg=1):
+    def searchContent(self, key, quick, pg="1"):
         self._select_best_site()
         self._ensure_session()
-        pg = int(pg)
+        pg = int(pg) if str(pg).isdigit() else 1
         resp = self._api_request('/ht/content/search', {
             'keywords': key,
             'pageNo': pg - 1,
             'pageSize': 20,
         })
         if not resp or resp.get('code') != 10000:
-            return _ok_page([], [])
+            return {'list': [], 'page': pg, 'pagecount': 1, 'limit': 0, 'total': 0}
         data = resp.get('data', {})
         if isinstance(data, list):
             items = data
         elif isinstance(data, dict):
-            items = (data.get('searchList') or data.get('list') or data.get('data')
-                  or data.get('videoList') or data.get('records')
-                  or data.get('resultList') or data.get('content') or [])
+            items = (data.get('searchList')
+                  or data.get('list')
+                  or data.get('data')
+                  or data.get('videoList')
+                  or data.get('records')
+                  or data.get('resultList')
+                  or data.get('content')
+                  or [])
         else:
-            return _ok_page([], [])
+            return {'list': [], 'page': pg, 'pagecount': 1, 'limit': 0, 'total': 0}
         if not isinstance(items, list):
-            return _ok_page([], [])
+            return {'list': [], 'page': pg, 'pagecount': 1, 'limit': 0, 'total': 0}
         vod_list = [p for v in items if (p := self._parse_video(v))]
         total_page = int(data.get('totalPage') or 1) if isinstance(data, dict) else max(1, len(vod_list) // 20)
         return {
@@ -795,13 +750,7 @@ class Spider(BaseSpider):
             'total': total_page * 20,
         }
 
-    def playerContent(self, flag, id, vipFlags=None):
-        try:
-            return self._playerContent_impl(flag, id, vipFlags)
-        except Exception:
-            return {'parse': 0, 'url': '', 'jx': 0, 'header': {}}
-
-    def _playerContent_impl(self, flag, id, vipFlags=None):
+    def playerContent(self, flag, id, vipFlags):
         url = id.split('$')[-1]
         if url.startswith('http'):
             return {
@@ -819,7 +768,8 @@ class Spider(BaseSpider):
         if not resp or resp.get('code') != 10000:
             return {'parse': 0, 'url': '', 'jx': 0}
         detail = resp.get('data', {})
-        play_url = (detail.get('playUrl') or detail.get('videoUrl') or detail.get('downUrl') or detail.get('url') or
+        play_url = (detail.get('playUrl') or detail.get('videoUrl') or
+                    detail.get('downUrl') or detail.get('url') or
                     detail.get('m3u8Url') or detail.get('sl') or '')
         return {
             'parse': 0,
@@ -831,11 +781,11 @@ class Spider(BaseSpider):
             },
         }
 
-    def localProxy(self, params):
+    def localProxy(self, param):
         try:
-            if params.get('type') != PROXY_TYPE:
+            if param.get('type') != PROXY_TYPE:
                 return [404, 'text/plain', 'not found']
-            img_url = params.get('url', '')
+            img_url = param.get('url', '')
             if not img_url:
                 return [400, 'text/plain', 'missing url']
             img_url = unquote(img_url)
