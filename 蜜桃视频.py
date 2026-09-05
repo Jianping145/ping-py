@@ -1,5 +1,6 @@
-# 蜜桃视频 T3 类型爬虫 (极速诊断版)
+# 蜜桃视频 T3 类型爬虫 (参照nww2.py框架重写)
 # 网站: https://www.nht966hht.vip:9527
+# API: AES-128-CBC (ZeroPadding) + MD5 签名加密
 
 # coding=utf-8
 # !/usr/bin/python
@@ -27,7 +28,7 @@ except Exception:
     except Exception:
         AES = None
 
-TIMEOUT = 5
+TIMEOUT = 10
 
 SITES = [
     {'name': 'nht966', 'host': 'https://www.nht966hht.vip:9527'},
@@ -67,7 +68,6 @@ class Spider(Spider):
         self._video_type_list = []
         self._session_cache = None
         self._session_cache_ttl = 1800
-        self._diag_msgs = []
 
     def getName(self):
         return "蜜桃视频"
@@ -78,11 +78,9 @@ class Spider(Spider):
     def manualVideoCheck(self):
         return False
 
-    def _diag(self, msg):
-        self._diag_msgs.append(str(msg)[:80])
-        if len(self._diag_msgs) > 5:
-            self._diag_msgs.pop(0)
-
+    # ============================================================
+    # 多站点测速
+    # ============================================================
     def _get_cached_site(self):
         try:
             if self._cached_host and (time.time() - self._cached_ts) < self._speed_cache_ttl:
@@ -99,9 +97,8 @@ class Spider(Spider):
             pass
 
     def _resolve_host(self, portal):
-        # 先尝试 HTTPS
         try:
-            r = requests.get(portal, headers=self.headers, timeout=TIMEOUT)
+            r = requests.get(portal, headers=self.headers, timeout=TIMEOUT, verify=False)
             text = r.text or ''
             if 'targetSites' in text:
                 m = re.search(r'targetSites\s*=\s*\[(.*?)\]', text, re.S)
@@ -112,24 +109,8 @@ class Spider(Spider):
                 return ''
             if r.status_code == 200:
                 return portal.rstrip('/')
-        except Exception as e:
-            self._diag('https_err:' + str(e)[:40])
-        # 降级 HTTP
-        try:
-            http_portal = portal.replace('https://', 'http://')
-            r = requests.get(http_portal, headers=self.headers, timeout=TIMEOUT)
-            text = r.text or ''
-            if 'targetSites' in text:
-                m = re.search(r'targetSites\s*=\s*\[(.*?)\]', text, re.S)
-                if m:
-                    urls = re.findall(r'https?://[^\s"\',\]]+', m.group(1))
-                    if urls:
-                        return urls[0].rstrip('/')
-                return ''
-            if r.status_code == 200:
-                return http_portal.rstrip('/')
-        except Exception as e:
-            self._diag('http_err:' + str(e)[:40])
+        except Exception:
+            pass
         return ''
 
     def _select_best_site(self):
@@ -151,6 +132,9 @@ class Spider(Spider):
         if resolved:
             self._save_cached_site(resolved)
 
+    # ============================================================
+    # 会话缓存
+    # ============================================================
     def _save_session_cache(self):
         try:
             self._session_cache = {
@@ -182,6 +166,9 @@ class Spider(Spider):
         except Exception:
             return False
 
+    # ============================================================
+    # AES
+    # ============================================================
     @staticmethod
     def _zero_pad(data, block_size=16):
         pad_len = block_size - (len(data) % block_size)
@@ -277,7 +264,7 @@ class Spider(Spider):
             headers['encrypt'] = 'true'
         try:
             r = self.session.post(api_url, data=body.encode('utf-8'),
-                                  headers=headers, timeout=TIMEOUT)
+                                  headers=headers, timeout=TIMEOUT, verify=False)
             resp = r.json()
             if resp.get('code') == 10000 and isinstance(resp.get('data'), str) and resp['data']:
                 try:
@@ -286,8 +273,7 @@ class Spider(Spider):
                 except Exception:
                     pass
             return resp
-        except Exception as e:
-            self._diag('api_err:' + str(e)[:40])
+        except Exception:
             return None
 
     def _ensure_session(self):
@@ -321,11 +307,6 @@ class Spider(Spider):
                 self._device_id = data['deviceId']
             if data.get('typeTitleList'):
                 self._categories = data['typeTitleList']
-            else:
-                self._diag('no_typeTitleList')
-        else:
-            code = resp1.get('code') if resp1 else 'None'
-            self._diag('initH5_1_code=' + str(code))
         self._api_request('/ht/users/initH5_2', _t=shared_t)
         resp = self._api_request('/ht/users/deviceLogin', {
             'bundleId': BUNDLE_ID,
@@ -336,9 +317,6 @@ class Spider(Spider):
             data = resp.get('data', {})
             self._user_id = data.get('userId', '')
             self._session_id = data.get('sessionId', '')
-        else:
-            code = resp.get('code') if resp else 'None'
-            self._diag('login_code=' + str(code))
         self._session_inited = True
         self._save_session_cache()
         return True
@@ -368,6 +346,9 @@ class Spider(Spider):
             self._speed_test_done = True
         return True
 
+    # ============================================================
+    # 首页
+    # ============================================================
     _CATEGORY_BLACKLIST = {'成人游戏', '漫画', '小说', '蜜穴女友', '一键脱衣', '春药商城', '同城交友', '吃瓜', '成人漫画', '女优', '专题'}
 
     def homeContent(self, filter):
@@ -383,80 +364,73 @@ class Spider(Spider):
                 {'type_id': 'actor', 'type_name': '女优'},
                 {'type_id': 'topic', 'type_name': '专题'},
             ]
-            diag_text = ' | '.join(self._diag_msgs) if self._diag_msgs else '网络不通或域名被墙'
-            return {
-                'class': classes,
-                'filters': {},
-                'list': [{
-                    'vod_id': 'diag',
-                    'vod_name': diag_text[:80],
-                    'vod_pic': '',
-                    'vod_remarks': '请开代理/VPN测试',
-                }],
-            }
+        else:
+            for cat in self._categories:
+                cid = str(cat.get('contentId', ''))
+                title = cat.get('title', '')
+                if not cid or not title or title in self._CATEGORY_BLACKLIST:
+                    continue
+                classes.append({'type_id': cid, 'type_name': title})
+                cat_filters = []
+                sub_cats = [v for v in self._video_type_list if str(v.get('typePid', '')) == cid]
+                if sub_cats:
+                    sub_values = [{'n': '全部', 'v': ''}]
+                    for sc in sub_cats:
+                        sc_id = str(sc.get('typeId', ''))
+                        sc_name = sc.get('typeName', '')
+                        if sc_id and sc_name:
+                            sub_values.append({'n': sc_name, 'v': sc_id})
+                    if len(sub_values) > 1:
+                        cat_filters.append({'key': 'label', 'name': '分类', 'value': sub_values})
+                first_level = [v for v in self._video_type_list
+                               if str(v.get('typePid', '')) == '0' and str(v.get('typeId', '')) == cid]
+                if first_level:
+                    tags_str = first_level[0].get('tags', '')
+                    if tags_str:
+                        tag_list = [t.strip() for t in tags_str.split(',') if t.strip()]
+                        if tag_list:
+                            tag_values = [{'n': '全部', 'v': ''}]
+                            for t in tag_list:
+                                tag_values.append({'n': t, 'v': t})
+                            cat_filters.append({'key': 'tag', 'name': '标签', 'value': tag_values})
+                cat_filters.append({'key': 'sort', 'name': '排序', 'value': [
+                    {'n': '最近更新', 'v': '0'},
+                    {'n': '最多播放', 'v': '1'},
+                    {'n': '最多收藏', 'v': '2'},
+                ]})
+                if cat_filters:
+                    filters[cid] = cat_filters
 
-        for cat in self._categories:
-            cid = str(cat.get('contentId', ''))
-            title = cat.get('title', '')
-            if not cid or not title or title in self._CATEGORY_BLACKLIST:
-                continue
-            classes.append({'type_id': cid, 'type_name': title})
-            cat_filters = []
-            sub_cats = [v for v in self._video_type_list if str(v.get('typePid', '')) == cid]
-            if sub_cats:
-                sub_values = [{'n': '全部', 'v': ''}]
-                for sc in sub_cats:
-                    sc_id = str(sc.get('typeId', ''))
-                    sc_name = sc.get('typeName', '')
-                    if sc_id and sc_name:
-                        sub_values.append({'n': sc_name, 'v': sc_id})
-                if len(sub_values) > 1:
-                    cat_filters.append({'key': 'label', 'name': '分类', 'value': sub_values})
-            first_level = [v for v in self._video_type_list
-                           if str(v.get('typePid', '')) == '0' and str(v.get('typeId', '')) == cid]
-            if first_level:
-                tags_str = first_level[0].get('tags', '')
-                if tags_str:
-                    tag_list = [t.strip() for t in tags_str.split(',') if t.strip()]
-                    if tag_list:
-                        tag_values = [{'n': '全部', 'v': ''}]
-                        for t in tag_list:
-                            tag_values.append({'n': t, 'v': t})
-                        cat_filters.append({'key': 'tag', 'name': '标签', 'value': tag_values})
-            cat_filters.append({'key': 'sort', 'name': '排序', 'value': [
-                {'n': '最近更新', 'v': '0'},
-                {'n': '最多播放', 'v': '1'},
-                {'n': '最多收藏', 'v': '2'},
-            ]})
-            if cat_filters:
-                filters[cid] = cat_filters
+            classes.append({'type_id': 'actor', 'type_name': '女优'})
+            actors_filters = []
+            actors_filters.append({'key': 'height', 'name': '身高', 'value': [
+                {'n': '身高', 'v': ''},
+            ] + [{'n': f'{h}cm', 'v': str(h)} for h in range(150, 165)]})
+            actors_filters.append({'key': 'cup', 'name': '罩杯', 'value': [
+                {'n': '罩杯', 'v': ''},
+            ] + [{'n': f'{c}罩杯', 'v': c} for c in 'ABCDEFG']})
+            actors_filters.append({'key': 'birthday', 'name': '年龄', 'value': [
+                {'n': '年龄', 'v': ''},
+            ] + [{'n': f'{y}年', 'v': str(y)} for y in range(2002, 1975, -1)]})
+            actors_filters.append({'key': 'debut', 'name': '出道', 'value': [
+                {'n': '出道', 'v': ''},
+            ] + [{'n': f'{y}年', 'v': str(y)} for y in range(2025, 2000, -1)]})
+            filters['actor'] = actors_filters
+            classes.append({'type_id': 'topic', 'type_name': '专题'})
 
-        classes.append({'type_id': 'actor', 'type_name': '女优'})
-        actors_filters = []
-        actors_filters.append({'key': 'height', 'name': '身高', 'value': [
-            {'n': '身高', 'v': ''},
-        ] + [{'n': f'{h}cm', 'v': str(h)} for h in range(150, 165)]})
-        actors_filters.append({'key': 'cup', 'name': '罩杯', 'value': [
-            {'n': '罩杯', 'v': ''},
-        ] + [{'n': f'{c}罩杯', 'v': c} for c in 'ABCDEFG']})
-        actors_filters.append({'key': 'birthday', 'name': '年龄', 'value': [
-            {'n': '年龄', 'v': ''},
-        ] + [{'n': f'{y}年', 'v': str(y)} for y in range(2002, 1975, -1)]})
-        actors_filters.append({'key': 'debut', 'name': '出道', 'value': [
-            {'n': '出道', 'v': ''},
-        ] + [{'n': f'{y}年', 'v': str(y)} for y in range(2025, 2000, -1)]})
-        filters['actor'] = actors_filters
-        classes.append({'type_id': 'topic', 'type_name': '专题'})
-
+        home_videos = self.categoryContent('home', 1, '', {})
         return {
             'class': classes,
             'filters': filters,
-            'list': [],
+            'list': home_videos.get('list', []),
         }
 
     def homeVideoContent(self, tid, pg, filter, extend):
         return self.categoryContent(tid or 'home', pg, filter, extend)
 
+    # ============================================================
+    # 分类列表
+    # ============================================================
     def categoryContent(self, tid, pg, filter, extend):
         tid = str(tid)
         pg = int(pg) if str(pg).isdigit() else 1
@@ -818,7 +792,7 @@ class Spider(Spider):
             r = requests.get(img_url, headers={
                 'User-Agent': self.headers['User-Agent'],
                 'Referer': self.host + '/',
-            }, timeout=TIMEOUT)
+            }, timeout=TIMEOUT, verify=False)
             if r.status_code != 200:
                 return [404, 'text/plain', 'image not found']
             data = r.content
