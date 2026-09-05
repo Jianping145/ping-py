@@ -1,6 +1,5 @@
-# 蜜桃视频 T3 类型爬虫 (参照nww2.py框架重写)
+# 蜜桃视频 T3 类型爬虫 (修复verify=False导致的T3请求异常)
 # 网站: https://www.nht966hht.vip:9527
-# API: AES-128-CBC (ZeroPadding) + MD5 签名加密
 
 # coding=utf-8
 # !/usr/bin/python
@@ -28,7 +27,7 @@ except Exception:
     except Exception:
         AES = None
 
-TIMEOUT = 10
+TIMEOUT = 8
 
 SITES = [
     {'name': 'nht966', 'host': 'https://www.nht966hht.vip:9527'},
@@ -68,6 +67,7 @@ class Spider(Spider):
         self._video_type_list = []
         self._session_cache = None
         self._session_cache_ttl = 1800
+        self._last_err = ''
 
     def getName(self):
         return "蜜桃视频"
@@ -78,9 +78,6 @@ class Spider(Spider):
     def manualVideoCheck(self):
         return False
 
-    # ============================================================
-    # 多站点测速
-    # ============================================================
     def _get_cached_site(self):
         try:
             if self._cached_host and (time.time() - self._cached_ts) < self._speed_cache_ttl:
@@ -98,7 +95,8 @@ class Spider(Spider):
 
     def _resolve_host(self, portal):
         try:
-            r = requests.get(portal, headers=self.headers, timeout=TIMEOUT, verify=False)
+            # 关键修复: 去掉 verify=False，和 nww2.py 保持一致
+            r = requests.get(portal, headers=self.headers, timeout=TIMEOUT)
             text = r.text or ''
             if 'targetSites' in text:
                 m = re.search(r'targetSites\s*=\s*\[(.*?)\]', text, re.S)
@@ -109,8 +107,8 @@ class Spider(Spider):
                 return ''
             if r.status_code == 200:
                 return portal.rstrip('/')
-        except Exception:
-            pass
+        except Exception as e:
+            self._last_err = 'resolve:' + str(e)[:60]
         return ''
 
     def _select_best_site(self):
@@ -132,9 +130,6 @@ class Spider(Spider):
         if resolved:
             self._save_cached_site(resolved)
 
-    # ============================================================
-    # 会话缓存
-    # ============================================================
     def _save_session_cache(self):
         try:
             self._session_cache = {
@@ -166,9 +161,6 @@ class Spider(Spider):
         except Exception:
             return False
 
-    # ============================================================
-    # AES
-    # ============================================================
     @staticmethod
     def _zero_pad(data, block_size=16):
         pad_len = block_size - (len(data) % block_size)
@@ -263,8 +255,9 @@ class Spider(Spider):
             headers['Content-Type'] = 'text/plain'
             headers['encrypt'] = 'true'
         try:
+            # 关键修复: 去掉 verify=False
             r = self.session.post(api_url, data=body.encode('utf-8'),
-                                  headers=headers, timeout=TIMEOUT, verify=False)
+                                  headers=headers, timeout=TIMEOUT)
             resp = r.json()
             if resp.get('code') == 10000 and isinstance(resp.get('data'), str) and resp['data']:
                 try:
@@ -273,7 +266,8 @@ class Spider(Spider):
                 except Exception:
                     pass
             return resp
-        except Exception:
+        except Exception as e:
+            self._last_err = 'api:' + str(e)[:60]
             return None
 
     def _ensure_session(self):
@@ -346,9 +340,6 @@ class Spider(Spider):
             self._speed_test_done = True
         return True
 
-    # ============================================================
-    # 首页
-    # ============================================================
     _CATEGORY_BLACKLIST = {'成人游戏', '漫画', '小说', '蜜穴女友', '一键脱衣', '春药商城', '同城交友', '吃瓜', '成人漫画', '女优', '专题'}
 
     def homeContent(self, filter):
@@ -418,19 +409,16 @@ class Spider(Spider):
             filters['actor'] = actors_filters
             classes.append({'type_id': 'topic', 'type_name': '专题'})
 
-        home_videos = self.categoryContent('home', 1, '', {})
+        # 修复: homeContent 不再预加载视频，避免超长等待
         return {
             'class': classes,
             'filters': filters,
-            'list': home_videos.get('list', []),
+            'list': [],
         }
 
     def homeVideoContent(self, tid, pg, filter, extend):
         return self.categoryContent(tid or 'home', pg, filter, extend)
 
-    # ============================================================
-    # 分类列表
-    # ============================================================
     def categoryContent(self, tid, pg, filter, extend):
         tid = str(tid)
         pg = int(pg) if str(pg).isdigit() else 1
@@ -792,7 +780,7 @@ class Spider(Spider):
             r = requests.get(img_url, headers={
                 'User-Agent': self.headers['User-Agent'],
                 'Referer': self.host + '/',
-            }, timeout=TIMEOUT, verify=False)
+            }, timeout=TIMEOUT)
             if r.status_code != 200:
                 return [404, 'text/plain', 'image not found']
             data = r.content
