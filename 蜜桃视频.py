@@ -1,4 +1,4 @@
-# 蜜桃视频 T3 类型爬虫 (T3 兼容版)
+# 蜜桃视频 T3 类型爬虫 (T3 诊断增强版)
 # 网站: https://www.nht966hht.vip:9527
 # API: AES-128-CBC (ZeroPadding) + MD5 签名加密
 
@@ -18,9 +18,18 @@ import re
 import os
 import string
 import random
-import threading
 from urllib.parse import quote, unquote
-from Crypto.Cipher import AES
+
+# ============================================================
+# T3 兼容: 尝试多种 AES 库导入
+# ============================================================
+try:
+    from Crypto.Cipher import AES
+except Exception:
+    try:
+        from Cryptodome.Cipher import AES
+    except Exception:
+        AES = None
 
 TIMEOUT = 10
 
@@ -42,6 +51,25 @@ VERSION   = '1.0.0'
 PROJECT_ID = '1'
 
 PROXY_TYPE = 'mitao_img'
+
+
+def _error_result(msg):
+    """出错时返回可显示的条目，方便在 T3 界面看错误"""
+    return {
+        'class': [{'type_id': 'error', 'type_name': '加载出错'}],
+        'filters': {},
+        'type': '影视',
+        'list': [{
+            'vod_id': 'error',
+            'vod_name': str(msg)[:80],
+            'vod_pic': '',
+            'vod_remarks': '请检查日志',
+        }],
+        'page': 1,
+        'pagecount': 1,
+        'limit': 1,
+        'total': 1,
+    }
 
 
 class Spider(BaseSpider):
@@ -69,8 +97,7 @@ class Spider(BaseSpider):
         "deviceType": "H5-android",
     }
 
-    # T3 兼容：内存缓存替代文件缓存（Android 无写权限 / __file__ 异常）
-    _lock = threading.Lock()
+    # T3 兼容：纯内存缓存（移除 threading.Lock，避免部分 T3 环境不支持）
     _speed_test_done = False
     _cached_host = ''
     _cached_ts = 0
@@ -82,59 +109,44 @@ class Spider(BaseSpider):
     _device_id = ''
     _session_inited = False
 
-    # 分类缓存 (从 initH5_1 typeTitleList)
+    # 分类缓存
     _categories = []
-
-    # 视频类型列表 (从 appConfig videoTypeList，用于构建筛选)
     _video_type_list = []
 
-    # 会话内存缓存（替代文件缓存，避免 T3 无写权限导致崩溃）
+    # 会话内存缓存
     _session_cache = None
     _session_cache_ttl = 1800
 
     # ============================================================
-    # 多站点测速 (内存缓存版)
+    # 多站点测速 (内存缓存版，无锁)
     # ============================================================
     def _get_cached_site(self):
-        """从内存缓存获取站点"""
         try:
-            with self._lock:
-                if self._cached_host and (time.time() - self._cached_ts) < self._speed_cache_ttl:
-                    return self._cached_host, True
+            if self._cached_host and (time.time() - self._cached_ts) < self._speed_cache_ttl:
+                return self._cached_host, True
         except Exception:
             pass
         return '', False
 
     def _save_cached_site(self, host):
-        """保存站点到内存缓存"""
         try:
-            with self._lock:
-                self._cached_host = host
-                self._cached_ts = time.time()
+            self._cached_host = host
+            self._cached_ts = time.time()
         except Exception:
             pass
 
     def _resolve_host(self, portal):
-        """
-        解析入口域名，返回当前真实 API 站点。
-        站点采用「随机重定向页」(Random Redirect Page) 做防封:
-        入口域名返回一段含 targetSites 数组的 HTML/JS (常见 HTTP 状态码 888),
-        真实站点会随时间轮换。此处解析 targetSites 取出当前真实站点。
-        若入口本身即为真实站点 (返回 SPA 页且无 targetSites)，则直接返回。
-        """
         try:
             r = requests.get(portal, headers=self.headers, timeout=TIMEOUT,
                              verify=False, allow_redirects=True)
             text = r.text or ''
-            # 随机重定向页 → 解析 targetSites 数组
             if 'targetSites' in text:
                 m = re.search(r'targetSites\s*=\s*\[(.*?)\]', text, re.S)
                 if m:
-                    urls = re.findall(r'https?://[^\s"',\]]+', m.group(1))
+                    urls = re.findall(r'https?://[^\s"\',\]]+', m.group(1))
                     if urls:
                         return urls[0].rstrip('/')
                 return ''
-            # 非重定向页且可访问 → 入口本身即真实站点
             if r.status_code == 200:
                 return portal.rstrip('/')
         except Exception:
@@ -149,27 +161,21 @@ class Spider(BaseSpider):
             self.host = cached_host
             self._speed_test_done = True
             return
-
-        # 依次解析各入口域名，取第一个解析出的真实站点
-        # 注意: 真实站点在高负载时根 GET 可能返回 429/502，
-        # 故只要能从 targetSites 解析出站点即信任，不再额外探测可用性，避免误判回退到已失效入口
         resolved = ''
         for s in SITES:
             h = self._resolve_host(s['host'])
             if h:
                 resolved = h
                 break
-
         self.host = resolved or SITES[0]['host']
         self._speed_test_done = True
         if resolved:
             self._save_cached_site(resolved)
 
     # ============================================================
-    # 会话缓存（内存版，避免 T3 文件写权限问题）
+    # 会话缓存（内存版）
     # ============================================================
     def _save_session_cache(self):
-        """将会话状态保存到内存"""
         try:
             self._session_cache = {
                 'ts': time.time(),
@@ -183,7 +189,6 @@ class Spider(BaseSpider):
             pass
 
     def _load_session_cache(self):
-        """从内存恢复会话状态，返回 True 表示缓存有效"""
         try:
             if self._session_cache is None:
                 return False
@@ -195,7 +200,6 @@ class Spider(BaseSpider):
             self._device_id = self._session_cache.get('device_id', '')
             self._categories = self._session_cache.get('categories', [])
             self._video_type_list = self._session_cache.get('video_type_list', [])
-            # 关键字段缺失视为缓存无效, 避免无认证请求被服务器拒绝
             if not self._user_id or not self._session_id:
                 return False
             return True
@@ -203,7 +207,7 @@ class Spider(BaseSpider):
             return False
 
     # ============================================================
-    # AES 加解密（匹配 CryptoJS ZeroPadding）
+    # AES 加解密
     # ============================================================
     @staticmethod
     def _zero_pad(data, block_size=16):
@@ -217,16 +221,15 @@ class Spider(BaseSpider):
         return data.rstrip(b'\x00')
 
     def _gen_key(self, timestamp):
-        """生成 AES-128 密钥: timestamp后6位 + signKey前4 + bundleId前6"""
         ts = str(timestamp)
         return ts[-6:] + SIGN_KEY[:4] + BUNDLE_ID[:6]
 
     def _gen_iv(self):
-        """生成 AES-128 IV: bundleId后6 + signKey后4 + deviceId前6"""
         return BUNDLE_ID[-6:] + SIGN_KEY[-4:] + self._device_id[:6]
 
     def _aes_encrypt(self, plaintext, key_str, iv_str):
-        """AES-128-CBC 加密 (ZeroPadding, 输出 Base64)"""
+        if AES is None:
+            raise ImportError('No AES module (pycryptodome)')
         key = key_str.encode('utf-8')
         iv = iv_str.encode('utf-8')
         cipher = AES.new(key, AES.MODE_CBC, iv)
@@ -236,11 +239,11 @@ class Spider(BaseSpider):
         return base64.b64encode(encrypted).decode('utf-8')
 
     def _aes_decrypt(self, ciphertext_b64, key_str, iv_str):
-        """AES-128-CBC 解密 (ZeroPadding, 输入 Base64)"""
+        if AES is None:
+            raise ImportError('No AES module (pycryptodome)')
         key = key_str.encode('utf-8')
         iv = iv_str.encode('utf-8')
         cipher = AES.new(key, AES.MODE_CBC, iv)
-        # 移除空白字符（匹配 JS 端 replace(/\s/g,"")）
         cleaned = re.sub(r'\s', '', ciphertext_b64)
         encrypted = base64.b64decode(cleaned)
         decrypted = cipher.decrypt(encrypted)
@@ -248,7 +251,6 @@ class Spider(BaseSpider):
         return unpadded.decode('utf-8', errors='replace')
 
     def _generate_sign(self, params, api_path):
-        """MD5 签名: 参数值排序拼接 + signKey + API路径 → MD5 大写"""
         sorted_keys = sorted(params.keys())
         concat = ''
         for k in sorted_keys:
@@ -257,69 +259,49 @@ class Spider(BaseSpider):
         return hashlib.md5(raw.encode('utf-8')).hexdigest().upper()
 
     # ============================================================
-    # 客户端 deviceId 生成（匹配 JS: "H5-" + 随机串）
+    # deviceId 生成（兼容旧版 Python，不用 random.choices）
     # ============================================================
     @staticmethod
     def _generate_device_id():
-        """生成 H5 设备 ID，格式: H5- + 32位随机小写hex"""
-        rand = ''.join(random.choices(string.ascii_lowercase + string.digits, k=32))
+        chars = string.ascii_lowercase + string.digits
+        rand = ''.join(random.choice(chars) for _ in range(32))
         return 'H5-' + rand
 
     # ============================================================
-    # 通用请求 params (Ne)
+    # 通用请求 params
     # ============================================================
     def _common_params(self):
-        # channelId2 = window.location.host (含端口，如 www.nht950hht.vip:9527)
         hostname = self.host.replace('https://', '').replace('http://', '')
         return {
             'timezone': 'Asia/Karachi',
             'version': VERSION,
-            'channelId': 67,  # 必须是整数! JS: __xyz_cid_ = 67, JSON.stringify 后为 67 而非 "67"
+            'channelId': 67,
             'channelId2': hostname,
             'brandId': BRAND_ID,
         }
 
     # ============================================================
-    # API 请求（支持加密/明文双模式）
+    # API 请求
     # ============================================================
     def _api_request(self, endpoint, params=None, skip_encrypt=False, _t=None):
-        """
-        发送 AES 加密 API 请求
-        endpoint: e.g. '/ht/content/homeH5'
-        params: 请求参数 dict
-        skip_encrypt: True = 发送明文 JSON (调试用, 部分 init 端点不需加密)
-        _t: 可选, 复用外部时间戳 (initH5_1/2 共用)
-        """
         if params is None:
             params = {}
-
-        # 毫秒时间戳 (支持外部传入, 匹配浏览器 initH5_1/2 共用 t 的行为)
         timestamp = str(_t) if _t else str(int(time.time() * 1000))
         key_str = self._gen_key(timestamp)
         iv_str = self._gen_iv()
-
-        # 构建完整参数: Ne() + {t} + 业务参数
         full_params = self._common_params()
         full_params['t'] = timestamp
         full_params.update(params)
-
-        # 签名: ze(params, endpoint) = MD5(sorted_values + signKey + path).upper()
         full_params['sign'] = self._generate_sign(full_params, endpoint)
-
         api_url = self.host + endpoint
         headers = dict(self.headers)
         headers['t'] = timestamp
-
         if self._user_id:
             headers['userId'] = self._user_id
         if self._session_id:
             headers['sessionId'] = self._session_id
-
-        # 必填请求头 (JS Ve 拦截器会设置这些)
         headers['deviceId'] = self._device_id or ''
         headers['bundleId'] = BUNDLE_ID
-
-        # 明文或加密
         if skip_encrypt:
             body = json.dumps(full_params, ensure_ascii=False, separators=(',', ':'))
             headers['Content-Type'] = 'application/json'
@@ -329,48 +311,28 @@ class Spider(BaseSpider):
             body = self._aes_encrypt(plain, key_str, iv_str)
             headers['Content-Type'] = 'text/plain'
             headers['encrypt'] = 'true'
-
         try:
             r = self.session.post(api_url, data=body,
                                   headers=headers, timeout=TIMEOUT, verify=False)
-
             resp = r.json()
-
-            # code=10000 表示成功，解密响应 data（仅加密请求需解密）
             if resp.get('code') == 10000 and isinstance(resp.get('data'), str) and resp['data']:
                 try:
                     decrypted = self._aes_decrypt(resp['data'], key_str, iv_str)
                     resp['data'] = json.loads(decrypted)
                 except Exception:
                     pass
-
             return resp
-
-        except requests.exceptions.Timeout:
-            return None
-        except requests.exceptions.ConnectionError:
-            return None
-        except json.JSONDecodeError:
-            return None
         except Exception:
             return None
 
     # ============================================================
-    # 会话初始化（匹配 JS 端流程）
+    # 会话初始化
     # ============================================================
     def _ensure_session(self):
-        """
-        初始化会话: 优先从内存缓存恢复 → 否则 appConfig → 生成 deviceId → initH5_1 → initH5_2 → deviceLogin
-        真实浏览器流程: appConfig 最先调，initH5_1/2 共用同一个 t 时间戳
-        缓存策略: 避免 T3 新建实例时重复 deviceLogin 触发 429 限流
-        """
         if self._session_inited:
             return
-
-        # 优先从内存缓存恢复（跳过整个 init 流程，避免 429）
         if self._load_session_cache():
             self._session_inited = True
-            # 旧缓存可能没有 video_type_list，补一次 appConfig 请求
             if not self._video_type_list:
                 appcfg = self._api_request('/ht/users/appConfig')
                 if appcfg and appcfg.get('code') == 10000:
@@ -380,12 +342,8 @@ class Spider(BaseSpider):
                         if isinstance(ac_cfg, dict) and ac_cfg.get('videoTypeList'):
                             self._video_type_list = ac_cfg['videoTypeList']
             return
-
-        # 0. 生成 deviceId (JS 端 $.getDeviceId() 在页面加载时就执行)
         if not self._device_id:
             self._device_id = self._generate_device_id()
-
-        # 0.5 appConfig — 真实浏览器第一个调的就是它，获取 videoTypeList 供筛选
         appcfg = self._api_request('/ht/users/appConfig')
         if appcfg and appcfg.get('code') == 10000:
             ac_data = appcfg.get('data', {})
@@ -393,23 +351,15 @@ class Spider(BaseSpider):
                 ac_cfg = ac_data['appConfig']
                 if isinstance(ac_cfg, dict) and ac_cfg.get('videoTypeList'):
                     self._video_type_list = ac_cfg['videoTypeList']
-
-        # 1. initH5_1 + initH5_2 共用一个 t (匹配浏览器行为)
         shared_t = int(time.time() * 1000)
         resp1 = self._api_request('/ht/users/initH5_1', _t=shared_t)
-
         if resp1 and resp1.get('code') == 10000:
             data = resp1.get('data', {})
             if data.get('deviceId'):
                 self._device_id = data['deviceId']
-            # 保存分类列表供 homeContent 使用
             if data.get('typeTitleList'):
                 self._categories = data['typeTitleList']
-
-        # 2. initH5_2 (复用 shared_t)
         self._api_request('/ht/users/initH5_2', _t=shared_t)
-
-        # 3. deviceLogin → 获取 userId / sessionId
         resp = self._api_request('/ht/users/deviceLogin', {
             'bundleId': BUNDLE_ID,
             'brandId': BRAND_ID,
@@ -419,7 +369,6 @@ class Spider(BaseSpider):
             data = resp.get('data', {})
             self._user_id = data.get('userId', '')
             self._session_id = data.get('sessionId', '')
-
         self._session_inited = True
         self._save_session_cache()
 
@@ -456,30 +405,28 @@ class Spider(BaseSpider):
     # ============================================================
     # 首页
     # ============================================================
-    # T3 首页统一入口: 同时返回分类列表 + 首页视频数据
-    # ============================================================
-    # 女优/专题/ 由下方特殊分类 (actor/topic) 单独处理，此处过滤掉 typeTitleList 中的同名项，避免重复且第一份无数据
     _CATEGORY_BLACKLIST = {'成人游戏', '漫画', '小说', '蜜穴女友', '一键脱衣', '春药商城', '同城交友', '吃瓜', '成人漫画', '女优', '专题'}
 
     def homeContent(self, filter):
+        try:
+            return self._homeContent_impl(filter)
+        except Exception as e:
+            import traceback
+            err = str(e) + ' | ' + traceback.format_exc().replace('\n', ' ')
+            return _error_result(err[:200])
+
+    def _homeContent_impl(self, filter):
         self._select_best_site()
         self._ensure_session()
-
         classes = []
         filters = {}
-
-        # 动态加载真实分类（来自 initH5_1 typeTitleList），过滤掉不需要的
         for cat in self._categories:
             cid = str(cat.get('contentId', ''))
             title = cat.get('title', '')
             if not cid or not title or title in self._CATEGORY_BLACKLIST:
                 continue
             classes.append({'type_id': cid, 'type_name': title})
-
-            # ---- 构建该分类的筛选器 ----
             cat_filters = []
-
-            # 1. 二级分类 (videoTypeList 中 typePid == contentId 的子项)
             sub_cats = [v for v in self._video_type_list if str(v.get('typePid', '')) == cid]
             if sub_cats:
                 sub_values = [{'n': '全部', 'v': ''}]
@@ -490,9 +437,6 @@ class Spider(BaseSpider):
                         sub_values.append({'n': sc_name, 'v': sc_id})
                 if len(sub_values) > 1:
                     cat_filters.append({'key': 'label', 'name': '分类', 'value': sub_values})
-
-            # 2. 标签 (尝试从 videoTypeList 中匹配该 contentId 对应一级类型的 tags)
-            #    一级类型 typePid==0 且 typeId 可能等于 contentId
             first_level = [v for v in self._video_type_list
                            if str(v.get('typePid', '')) == '0' and str(v.get('typeId', '')) == cid]
             if first_level:
@@ -504,49 +448,29 @@ class Spider(BaseSpider):
                         for t in tag_list:
                             tag_values.append({'n': t, 'v': t})
                         cat_filters.append({'key': 'tag', 'name': '标签', 'value': tag_values})
-
-            # 3. 排序 (JS sortList: ["最近更新","最多播放","最多收藏"] → 索引 0/1/2)
             cat_filters.append({'key': 'sort', 'name': '排序', 'value': [
                 {'n': '最近更新', 'v': '0'},
                 {'n': '最多播放', 'v': '1'},
                 {'n': '最多收藏', 'v': '2'},
             ]})
-
             if cat_filters:
                 filters[cid] = cat_filters
-
-        # ---- 添加特殊分类: 女优 (actor) ----
         classes.append({'type_id': 'actor', 'type_name': '女优'})
-
-        # 动态生成筛选值 (API 只接受单值精确匹配)
         _actors_filters = []
-
-        # 身高: 150-164cm
         _actors_filters.append({'key': 'height', 'name': '身高', 'value': [
             {'n': '身高', 'v': ''},
         ] + [{'n': f'{h}cm', 'v': str(h)} for h in range(150, 165)]})
-
-        # 罩杯: A-G
         _actors_filters.append({'key': 'cup', 'name': '罩杯', 'value': [
             {'n': '罩杯', 'v': ''},
         ] + [{'n': f'{c}罩杯', 'v': c} for c in 'ABCDEFG']})
-
-        # 年龄: 1976-2002 (出生年份)
         _actors_filters.append({'key': 'birthday', 'name': '年龄', 'value': [
             {'n': '年龄', 'v': ''},
         ] + [{'n': f'{y}年', 'v': str(y)} for y in range(2002, 1975, -1)]})
-
-        # 出道: 2001-2025
         _actors_filters.append({'key': 'debut', 'name': '出道', 'value': [
             {'n': '出道', 'v': ''},
         ] + [{'n': f'{y}年', 'v': str(y)} for y in range(2025, 2000, -1)]})
-
         filters['actor'] = _actors_filters
-
-        # ---- 添加特殊分类: 专题 (topic) ----
         classes.append({'type_id': 'topic', 'type_name': '专题'})
-
-        # 同时返回首页推荐视频列表 (兼容 T3 统一返回模式)
         home_videos = self.categoryContent('home', 1, '', {})
         return {
             'class': classes,
@@ -566,21 +490,23 @@ class Spider(BaseSpider):
     # 分类列表
     # ============================================================
     def categoryContent(self, tid, pg, filter, extend):
+        try:
+            return self._categoryContent_impl(tid, pg, filter, extend)
+        except Exception as e:
+            import traceback
+            err = str(e) + ' | ' + traceback.format_exc().replace('\n', ' ')
+            return _error_result(err[:200])
+
+    def _categoryContent_impl(self, tid, pg, filter, extend):
         tid = str(tid)
         pg = int(pg)
-
         self._select_best_site()
         self._ensure_session()
-
         vod_list = []
-
-        # ---- @ folder 模式: 点击文件夹 → 获取视频列表 ----
         if '@' in tid:
             real_tid = tid.replace('@', '')
             if real_tid.startswith('actor_'):
                 actor_id = real_tid[len('actor_'):]
-
-                # 先查演员名
                 detail_resp = self._api_request('/ht/content/queryActorDetail', {
                     'actorId': actor_id,
                 })
@@ -589,8 +515,6 @@ class Spider(BaseSpider):
                     detail_data = detail_resp.get('data', {})
                     actor_info = (detail_data.get('actorDetail') or detail_data or {})
                     actor_name = (actor_info.get('actorName') or actor_info.get('actor_name') or '')
-
-                # 用演员名搜索视频
                 if actor_name:
                     resp = self._api_request('/ht/content/search', {
                         'keywords': actor_name,
@@ -598,23 +522,19 @@ class Spider(BaseSpider):
                         'pageSize': '20',
                     })
                 else:
-                    # 降级: 用 actorId 尝试 queryTypeVideosH5
                     resp = self._api_request('/ht/content/queryTypeVideosH5', {
                         'actorId': actor_id,
                         'pageNo': str(pg - 1),
                         'pageSize': '20',
                         'type': '1',
                     })
-
                 if not resp or resp.get('code') != 10000:
                     return {'list': [], 'page': pg, 'pagecount': 1, 'limit': 0, 'total': 0}
-
                 data = resp.get('data', {})
                 vod_list = self._extract_videos_from_data(data)
                 total_page = int(data.get('totalPage') or data.get('total_page') or 1)
                 return {'list': vod_list, 'page': pg, 'pagecount': max(total_page, 1),
                         'limit': len(vod_list), 'total': max(total_page, 1) * 20}
-
             elif real_tid.startswith('topic_'):
                 topic_id = real_tid[len('topic_'):]
                 resp = self._api_request('/ht/content/queryOriTopicVideos', {
@@ -624,19 +544,14 @@ class Spider(BaseSpider):
                 })
                 if not resp or resp.get('code') != 10000:
                     return {'list': [], 'page': pg, 'pagecount': 1, 'limit': 0, 'total': 0}
-
                 data = resp.get('data', {})
                 vod_list = self._extract_videos_from_data(data)
                 total_page = int(data.get('totalPage') or data.get('total_page') or 1)
                 return {'list': vod_list, 'page': pg, 'pagecount': max(total_page, 1),
                         'limit': len(vod_list), 'total': max(total_page, 1) * 20}
-
             else:
                 return {'list': [], 'page': pg, 'pagecount': 1, 'limit': 0, 'total': 0}
-
-        # ---- 女优列表 (folder 模式) ----
         if tid == 'actor':
-            # 构建 API 参数, 映射 extend 中的筛选 key → API 参数名
             api_params = {
                 'pageNo': str(pg - 1),
                 'pageSize': '20',
@@ -652,18 +567,14 @@ class Spider(BaseSpider):
                     val = extend.get(ek, '')
                     if val:
                         api_params[ak] = val
-
             resp = self._api_request('/ht/content/getActors', api_params)
             if not resp or resp.get('code') != 10000:
                 return {'list': [], 'page': pg, 'pagecount': 1, 'limit': 0, 'total': 0}
-
             data = resp.get('data', {})
             vod_list = self._parse_actor_list(data)
             total_page = int(data.get('totalPage') or 1)
             return {'list': vod_list, 'page': pg, 'pagecount': total_page,
                     'limit': len(vod_list), 'total': total_page * 20}
-
-        # ---- 专题列表 (folder 模式) ----
         if tid == 'topic':
             resp = self._api_request('/ht/content/getOriTopicList', {
                 'pageNo': str(pg - 1),
@@ -671,15 +582,11 @@ class Spider(BaseSpider):
             })
             if not resp or resp.get('code') != 10000:
                 return {'list': [], 'page': pg, 'pagecount': 1, 'limit': 0, 'total': 0}
-
             data = resp.get('data', {})
             vod_list = self._parse_topic_list(data)
             return {'list': vod_list, 'page': pg, 'pagecount': 50, 'limit': len(vod_list),
                     'total': len(vod_list) * 50}
-
         if tid in ('home', 'new', 'hot'):
-            # 首页/最新/热门 → 使用 queryTypeVideosH5
-            # homeH5 端点始终返回 20001，改用已验证通的 queryTypeVideosH5
             sort_map = {'home': '1', 'new': '1', 'hot': '2'}
             resp = self._api_request('/ht/content/queryTypeVideosH5', {
                 'pageNo': str(pg - 1),
@@ -689,47 +596,35 @@ class Spider(BaseSpider):
             })
             if not resp or resp.get('code') != 10000:
                 return {'list': [], 'page': pg, 'pagecount': 1, 'limit': 0, 'total': 0}
-
             data = resp.get('data', {})
-
             items = (data.get('typeVideoList') or data.get('list') or data.get('data') or data.get('videoList') or [])
-
             if isinstance(items, list):
                 for v in items:
                     parsed = self._parse_video(v)
                     if parsed:
                         vod_list.append(parsed)
-
         else:
-            # 数值分类 (contentId) → queryTypeVideosH5
-            # T3 通过 extend dict 传递筛选和排序参数
-            #   extend: {'label': '子分类id', 'tag': '标签名', 'sort': '排序值'}
             api_params = {
                 'pageNo': str(pg - 1),
                 'pageSize': '20',
-                'typeId': tid,          # 按分类过滤（queryTypeVideosH5 → typeId）
-                'type': '1',            # 媒体类型 1=视频（home 分支也带，缺少会导致 API 返回默认列表）
+                'typeId': tid,
+                'type': '1',
             }
             if isinstance(extend, dict):
                 for key in ('label', 'tag', 'sort'):
                     val = extend.get(key, '')
                     if val:
                         api_params[key] = val
-
             resp = self._api_request('/ht/content/queryTypeVideosH5', api_params)
             if not resp or resp.get('code') != 10000:
                 return {'list': [], 'page': pg, 'pagecount': 1, 'limit': 0, 'total': 0}
-
             data = resp.get('data', {})
             items = (data.get('typeVideoList') or data.get('list') or data.get('data') or data.get('videoList') or [])
-
             if isinstance(items, list):
                 for v in items:
                     parsed = self._parse_video(v)
                     if parsed:
                         vod_list.append(parsed)
-
-        # 使用 API 返回的真实 totalPage（pageSize 固定 20）
         total_page = int(data.get('totalPage') or 1)
         return {
             'list': vod_list,
@@ -739,12 +634,7 @@ class Spider(BaseSpider):
             'total': total_page * 20,
         }
 
-    # ============================================================
-    # 辅助: 从 data 提取视频列表
-    # ============================================================
     def _extract_videos_from_data(self, data):
-        """从响应 data 中提取视频列表（多种格式兼容）"""
-        # data 可能是 dict 或 list
         if isinstance(data, list):
             items = data
         elif not isinstance(data, dict):
@@ -759,24 +649,15 @@ class Spider(BaseSpider):
             return []
         return [p for v in items if (p := self._parse_video(v))]
 
-    # ============================================================
-    # 辅助: 从 dict item 中尝试获取字段值（多种命名兼容）
-    # ============================================================
     @staticmethod
     def _try_get(item, *keys):
-        """依次尝试多个字段名, 返回第一个非空值"""
         for k in keys:
             v = item.get(k)
             if v is not None and v != '':
                 return v
         return ''
 
-    # ============================================================
-    # 解析女优列表（getActors API 响应 → folder list, vod_id + '@'）
-    # ============================================================
     def _parse_actor_list(self, data):
-        """解析 getActors 返回的演员列表，生成带 @ 后缀的 folder 条目"""
-        # data 可能是 dict 或 list
         if isinstance(data, list):
             items = data
         elif not isinstance(data, dict):
@@ -786,13 +667,11 @@ class Spider(BaseSpider):
                      or data.get('data') or [])
         if not isinstance(items, list):
             return []
-
         results = []
         seen = set()
         for item in items:
             if not isinstance(item, dict):
                 continue
-
             actor_id = str(self._try_get(item,
                 'actorId', 'contentId', 'id', 'artId', 'actor_id', 'userId'))
             actor_name = str(self._try_get(item,
@@ -803,14 +682,11 @@ class Spider(BaseSpider):
             actor_count = str(self._try_get(item,
                 'videoCount', 'contentCount', 'count', 'totalCount',
                 'total', 'video_count'))
-
             if not actor_id:
                 continue
             if actor_id in seen:
                 continue
             seen.add(actor_id)
-
-            # 兜底: 无图时用 favicon 保证 item 可见
             if not actor_img:
                 actor_img = self.host + '/favicon.ico'
             remarks = f'{actor_count}部' if actor_count else ''
@@ -821,15 +697,9 @@ class Spider(BaseSpider):
                 'vod_tag': 'folder',
                 'vod_remarks': remarks,
             })
-
         return results
 
-    # ============================================================
-    # 解析专题列表（getOriTopicList API 响应 → folder list, vod_id + '@'）
-    # ============================================================
     def _parse_topic_list(self, data):
-        """解析 getOriTopicList 返回的专题列表，生成带 @ 后缀的 folder 条目"""
-        # data 可能是 dict 或 list
         if isinstance(data, list):
             items = data
         elif not isinstance(data, dict):
@@ -839,13 +709,11 @@ class Spider(BaseSpider):
                      or data.get('data') or data.get('topics') or [])
         if not isinstance(items, list):
             return []
-
         results = []
         seen = set()
         for item in items:
             if not isinstance(item, dict):
                 continue
-
             topic_id = str(self._try_get(item,
                 'topicId', 'id', 'contentId', 'oriTopicId', 'topic_id'))
             topic_name = str(self._try_get(item,
@@ -856,14 +724,11 @@ class Spider(BaseSpider):
             topic_count = str(self._try_get(item,
                 'videoCount', 'count', 'contentCount', 'totalCount',
                 'total', 'video_count'))
-
             if not topic_id:
                 continue
             if topic_id in seen:
                 continue
             seen.add(topic_id)
-
-            # 兜底: 无图时用 favicon 保证 item 可见
             if not topic_img:
                 topic_img = self.host + '/favicon.ico'
             remarks = f'{topic_count}部' if topic_count else ''
@@ -874,28 +739,17 @@ class Spider(BaseSpider):
                 'vod_tag': 'folder',
                 'vod_remarks': remarks,
             })
-
         return results
 
-    # ============================================================
-    # 解析视频条目
-    # ============================================================
     def _parse_video(self, item):
-        # 仅过滤真正的广告: contentType=3 且带 jumpScheme 跳转链接
-        # 注意: 部分真实影片 contentType 也会是 3, 不能一刀切过滤, 否则女优影片被吞
         if item.get('contentType') == 3 and item.get('jumpScheme'):
             return None
-
-
         vid = str(item.get('contentId') or item.get('id') or item.get('videoId') or '')
         title = item.get('title') or item.get('name') or item.get('videoTitle') or ''
         pic = item.get('img') or item.get('cover') or item.get('coverUrl') or item.get('pic') or item.get('imageUrl') or ''
         remarks = item.get('duration') or item.get('playCount') or item.get('remark') or ''
-
-        # 时长格式化
         if remarks and str(remarks).isdigit():
             remarks = self._fmt_duration(remarks)
-
         return {
             'vod_id': vid,
             'vod_name': title,
@@ -903,28 +757,25 @@ class Spider(BaseSpider):
             'vod_remarks': str(remarks) if remarks else '',
         }
 
-    # ============================================================
-    # 详情页
-    # ============================================================
     def detailContent(self, ids):
-        did = ids[0] if isinstance(ids, list) else ids
+        try:
+            return self._detailContent_impl(ids)
+        except Exception as e:
+            import traceback
+            err = str(e) + ' | ' + traceback.format_exc().replace('\n', ' ')
+            return _error_result(err[:200])
 
+    def _detailContent_impl(self, ids):
+        did = ids[0] if isinstance(ids, list) else ids
         self._select_best_site()
         self._ensure_session()
-
         resp = self._api_request('/ht/content/detail', {'contentId': str(did)})
         if not resp or resp.get('code') != 10000:
             return {'list': []}
-
         detail = resp.get('data', {})
-
         if not detail:
             return {'list': []}
-
-        # 真实标题/封面/简介/时长/演员 均在嵌套的 videoDetail 中, 顶层仅有播放地址
         vd = detail.get('videoDetail') or {}
-
-        # 兼容多种字段名 (优先 videoDetail, 回退顶层)
         title = (vd.get('title') or detail.get('title') or detail.get('name') or
                  detail.get('videoTitle') or '未知标题')
         pic = (vd.get('img') or vd.get('cover') or vd.get('coverUrl') or
@@ -935,16 +786,12 @@ class Spider(BaseSpider):
         duration = vd.get('duration') or detail.get('duration', 0)
         actor = (vd.get('author') or vd.get('actor') or vd.get('actors') or
                  detail.get('actor') or detail.get('actors') or '')
-
-        # 播放地址在顶层: playUrl(m3u8) / downUrl(mp4)
         play_url = (detail.get('playUrl') or detail.get('videoUrl') or
                     detail.get('downUrl') or detail.get('url') or
                     detail.get('m3u8Url') or detail.get('sl') or '')
-
         vod_play_url = '播放$' + str(did)
         if play_url:
             vod_play_url = '播放$' + play_url
-
         return {'list': [{
             'vod_id': str(did),
             'vod_name': title,
@@ -960,13 +807,17 @@ class Spider(BaseSpider):
             'type': 'video',
         }]}
 
-    # ============================================================
-    # 搜索
-    # ============================================================
     def searchContent(self, key, quick, pg=1):
+        try:
+            return self._searchContent_impl(key, quick, pg)
+        except Exception as e:
+            import traceback
+            err = str(e) + ' | ' + traceback.format_exc().replace('\n', ' ')
+            return _error_result(err[:200])
+
+    def _searchContent_impl(self, key, quick, pg=1):
         self._select_best_site()
         self._ensure_session()
-
         pg = int(pg)
         resp = self._api_request('/ht/content/search', {
             'keywords': key,
@@ -975,13 +826,9 @@ class Spider(BaseSpider):
         })
         if not resp or resp.get('code') != 10000:
             return {'list': [], 'page': pg, 'pagecount': 1, 'limit': 0, 'total': 0}
-
         data = resp.get('data', {})
-
-        # 兼容多种 data 形态：list / dict
         if isinstance(data, list):
             items = data
-            total_n = len(data)
         elif isinstance(data, dict):
             items = (data.get('searchList')
                   or data.get('list')
@@ -991,13 +838,10 @@ class Spider(BaseSpider):
                   or data.get('resultList')
                   or data.get('content')
                   or [])
-            total_n = data.get('total') or data.get('totalCount') or data.get('totalNum') or 0
         else:
             return {'list': [], 'page': pg, 'pagecount': 1, 'limit': 0, 'total': 0}
-
         if not isinstance(items, list):
             return {'list': [], 'page': pg, 'pagecount': 1, 'limit': 0, 'total': 0}
-
         vod_list = [p for v in items if (p := self._parse_video(v))]
         total_page = int(data.get('totalPage') or 1) if isinstance(data, dict) else max(1, len(vod_list) // 20)
         return {
@@ -1008,13 +852,16 @@ class Spider(BaseSpider):
             'total': total_page * 20,
         }
 
-    # ============================================================
-    # 播放解析
-    # ============================================================
     def playerContent(self, flag, id, vipFlags=None):
-        url = id.split('$')[-1]
+        try:
+            return self._playerContent_impl(flag, id, vipFlags)
+        except Exception as e:
+            import traceback
+            err = str(e) + ' | ' + traceback.format_exc().replace('\n', ' ')
+            return {'parse': 0, 'url': '', 'jx': 0, 'header': {}}
 
-        # 如果已经是完整 URL
+    def _playerContent_impl(self, flag, id, vipFlags=None):
+        url = id.split('$')[-1]
         if url.startswith('http'):
             return {
                 'parse': 0,
@@ -1025,20 +872,15 @@ class Spider(BaseSpider):
                     'Referer': self.host + '/',
                 },
             }
-
-        # 否则作为 videoId 重新获取
         self._select_best_site()
         self._ensure_session()
-
         resp = self._api_request('/ht/content/detail', {'contentId': url})
         if not resp or resp.get('code') != 10000:
             return {'parse': 0, 'url': '', 'jx': 0}
-
         detail = resp.get('data', {})
         play_url = (detail.get('playUrl') or detail.get('videoUrl') or
                     detail.get('downUrl') or detail.get('url') or
                     detail.get('m3u8Url') or detail.get('sl') or '')
-
         return {
             'parse': 0,
             'url': play_url,
@@ -1049,38 +891,27 @@ class Spider(BaseSpider):
             },
         }
 
-    # ============================================================
-    # 图片代理
-    # ============================================================
     def localProxy(self, params):
         try:
             if params.get('type') != PROXY_TYPE:
                 return [404, 'text/plain', 'not found']
-
             img_url = params.get('url', '')
             if not img_url:
                 return [400, 'text/plain', 'missing url']
-
             img_url = unquote(img_url)
-
             r = requests.get(img_url, headers={
                 'User-Agent': self.headers['User-Agent'],
                 'Referer': self.host + '/',
             }, timeout=TIMEOUT, verify=False)
-
             if r.status_code != 200:
                 return [404, 'text/plain', 'image not found']
-
             data = r.content
-
-            # 尝试 XOR 0x88 解密 (蜜桃图片防盗链, _xfile.jpg 全部 XOR)
             if data[:2] != b'\xff\xd8' and data[:4] != b'\x89PNG' \
                     and not (data[:4] == b'RIFF' and data[8:12] == b'WEBP'):
                 decoded = bytes(b ^ 0x88 for b in data)
                 if decoded[:2] == b'\xff\xd8' or decoded[:4] == b'\x89PNG' \
                         or (decoded[:4] == b'RIFF' and decoded[8:12] == b'WEBP'):
                     data = decoded
-
             if data[:2] == b'\xff\xd8':
                 return [200, 'image/jpeg', data, {'Content-Length': str(len(data))}]
             elif data[:4] == b'\x89PNG':
