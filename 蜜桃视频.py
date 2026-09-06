@@ -48,6 +48,7 @@ class Spider(Spider):
     def __init__(self):
         super().__init__()
         self.session = requests.Session()
+        self.api_url = ''
         self.host = SITES[0]['host']
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
@@ -327,6 +328,15 @@ class Spider(Spider):
         base_proxy = self.getProxyUrl()
         if not base_proxy:
             base_proxy = 'http://127.0.0.1:9980/proxy?do=py'
+        # TVBox 框架路由 localProxy 必须依赖 api 参数定位爬虫实例
+        if 'api=' not in base_proxy:
+            api_url = getattr(self, 'api_url', '') or getattr(self, 'api', '') or getattr(self, 'extend', '')
+            # 兜底：硬编码默认 api 地址（从日志确认）
+            if not api_url:
+                api_url = 'https://raw.githubusercontent.com/Jianping145/ping-py/refs/heads/main/蜜桃视频.py'
+            if api_url and isinstance(api_url, str):
+                # safe=':/' 保留 https:// 原样，只编码中文等特殊字符
+                base_proxy += '&api=' + quote(api_url, safe=':/')
         return base_proxy + '&type=' + PROXY_TYPE + '&url=' + quote(img_url, safe='')
 
     def _fmt_duration(self, seconds):
@@ -340,6 +350,9 @@ class Spider(Spider):
         return f"{m}:{s:02d}"
 
     def init(self, extend=""):
+        self.extend = extend
+        if extend and isinstance(extend, str) and extend.startswith('http'):
+            self.api_url = extend
         cached_host, valid = self._get_cached_site()
         if valid:
             self.host = cached_host
@@ -781,54 +794,45 @@ class Spider(Spider):
             },
         }
 
+
     def localProxy(self, param):
-        # 禁用 SSL 警告，避免日志污染
         try:
             import urllib3
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         except Exception:
             pass
         try:
-            if param.get('type') != PROXY_TYPE:
-                return [404, 'text/plain', 'not found']
-            img_url = param.get('url', '')
-            if not img_url:
-                return [400, 'text/plain', 'missing url']
-            img_url = unquote(img_url)
-
-            # 更完整的请求头，降低被 CDN/源站拦截的概率
+            # 兼容 Chaquopy Java Map → Python dict
+            if not isinstance(param, dict):
+                try:
+                    param = dict(param)
+                except Exception:
+                    param = {}
+            ptype = str(param.get('type', '')).strip()
+            purl = str(param.get('url', '')).strip()
+            # 如果传了 type 但不匹配，返回 404
+            if ptype and ptype != PROXY_TYPE:
+                return [404, 'text/plain', b'not found']
+            if not purl:
+                return [400, 'text/plain', b'missing url']
+            img_url = unquote(purl)
             headers = {
-                'User-Agent': self.headers.get('User-Agent', 'Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'),
+                'User-Agent': self.headers.get('User-Agent', 'Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36'),
                 'Referer': self.host + '/',
-                'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+                'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
                 'Accept-Language': 'zh-CN,zh;q=0.9',
-                'Connection': 'keep-alive',
             }
-
-            r = requests.get(img_url, headers=headers, timeout=TIMEOUT, verify=False, allow_redirects=True)
+            r = requests.get(img_url, headers=headers, timeout=TIMEOUT, verify=False)
             if r.status_code != 200:
-                return [r.status_code, 'text/plain', f'image fetch failed with status {r.status_code}']
-
+                return [r.status_code, 'text/plain', b'fetch failed']
             data = r.content
             if not data or len(data) < 8:
-                return [404, 'text/plain', 'image too small or empty']
-
-            # 判断是否为已知图片格式
-            is_jpeg = data[:2] == b'\xff\xd8'
-            is_png  = data[:4] == b'\x89PNG'
-            is_webp = len(data) >= 12 and data[:4] == b'RIFF' and data[8:12] == b'WEBP'
-            is_gif  = data[:4] == b'GIF8'
-
-            # 若不是已知格式，尝试 XOR 0x88 解密
-            if not (is_jpeg or is_png or is_webp or is_gif):
-                decoded = bytes(b ^ 0x88 for b in data)
-                dec_jpeg = decoded[:2] == b'\xff\xd8'
-                dec_png  = decoded[:4] == b'\x89PNG'
-                dec_webp = len(decoded) >= 12 and decoded[:4] == b'RIFF' and decoded[8:12] == b'WEBP'
-                if dec_jpeg or dec_png or dec_webp:
-                    data = decoded
-
-            # 重新识别 MIME
+                return [404, 'text/plain', b'image too small']
+            # 尝试 XOR 0x88 解密
+            decoded = bytes(b ^ 0x88 for b in data)
+            if decoded[:2] == b'\xff\xd8' or decoded[:4] == b'\x89PNG' or                (len(decoded) >= 12 and decoded[:4] == b'RIFF' and decoded[8:12] == b'WEBP'):
+                data = decoded
+            # 识别 MIME
             if data[:2] == b'\xff\xd8':
                 mime = 'image/jpeg'
             elif data[:4] == b'\x89PNG':
@@ -841,7 +845,9 @@ class Spider(Spider):
                 mime = r.headers.get('Content-Type', 'image/jpeg')
                 if not mime or not mime.startswith('image/'):
                     mime = 'image/jpeg'
-
             return [200, mime, data, {'Content-Length': str(len(data))}]
-        except Exception as e:
-            return [500, 'text/plain', f'proxy error: {str(e)}']
+        except Exception:
+            return [500, 'text/plain', b'proxy error', {}]
+
+    def proxy(self, param):
+        return self.localProxy(param)
