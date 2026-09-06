@@ -782,6 +782,12 @@ class Spider(Spider):
         }
 
     def localProxy(self, param):
+        # 禁用 SSL 警告，避免日志污染
+        try:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        except Exception:
+            pass
         try:
             if param.get('type') != PROXY_TYPE:
                 return [404, 'text/plain', 'not found']
@@ -789,29 +795,53 @@ class Spider(Spider):
             if not img_url:
                 return [400, 'text/plain', 'missing url']
             img_url = unquote(img_url)
-            r = requests.get(img_url, headers={
-                'User-Agent': self.headers['User-Agent'],
+
+            # 更完整的请求头，降低被 CDN/源站拦截的概率
+            headers = {
+                'User-Agent': self.headers.get('User-Agent', 'Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'),
                 'Referer': self.host + '/',
-            }, timeout=TIMEOUT, verify=False)
+                'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+                'Accept-Language': 'zh-CN,zh;q=0.9',
+                'Connection': 'keep-alive',
+            }
+
+            r = requests.get(img_url, headers=headers, timeout=TIMEOUT, verify=False, allow_redirects=True)
             if r.status_code != 200:
-                return [404, 'text/plain', 'image not found']
+                return [r.status_code, 'text/plain', f'image fetch failed with status {r.status_code}']
+
             data = r.content
-            if data[:2] != b'\xff\xd8' and data[:4] != b'\x89PNG' \
-                    and not (data[:4] == b'RIFF' and data[8:12] == b'WEBP'):
+            if not data or len(data) < 8:
+                return [404, 'text/plain', 'image too small or empty']
+
+            # 判断是否为已知图片格式
+            is_jpeg = data[:2] == b'\xff\xd8'
+            is_png  = data[:4] == b'\x89PNG'
+            is_webp = len(data) >= 12 and data[:4] == b'RIFF' and data[8:12] == b'WEBP'
+            is_gif  = data[:4] == b'GIF8'
+
+            # 若不是已知格式，尝试 XOR 0x88 解密
+            if not (is_jpeg or is_png or is_webp or is_gif):
                 decoded = bytes(b ^ 0x88 for b in data)
-                if decoded[:2] == b'\xff\xd8' or decoded[:4] == b'\x89PNG' \
-                        or (decoded[:4] == b'RIFF' and decoded[8:12] == b'WEBP'):
+                dec_jpeg = decoded[:2] == b'\xff\xd8'
+                dec_png  = decoded[:4] == b'\x89PNG'
+                dec_webp = len(decoded) >= 12 and decoded[:4] == b'RIFF' and decoded[8:12] == b'WEBP'
+                if dec_jpeg or dec_png or dec_webp:
                     data = decoded
+
+            # 重新识别 MIME
             if data[:2] == b'\xff\xd8':
-                return [200, 'image/jpeg', data, {'Content-Length': str(len(data))}]
+                mime = 'image/jpeg'
             elif data[:4] == b'\x89PNG':
-                return [200, 'image/png', data, {'Content-Length': str(len(data))}]
-            elif data[:4] == b'RIFF' and data[8:12] == b'WEBP':
-                return [200, 'image/webp', data, {'Content-Length': str(len(data))}]
+                mime = 'image/png'
+            elif len(data) >= 12 and data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+                mime = 'image/webp'
+            elif data[:4] == b'GIF8':
+                mime = 'image/gif'
             else:
                 mime = r.headers.get('Content-Type', 'image/jpeg')
-                if mime.startswith('image/'):
-                    return [200, mime, data, {'Content-Length': str(len(data))}]
-                return [404, 'text/plain', 'invalid image format']
-        except Exception:
-            return [500, 'text/plain', 'proxy error']
+                if not mime or not mime.startswith('image/'):
+                    mime = 'image/jpeg'
+
+            return [200, mime, data, {'Content-Length': str(len(data))}]
+        except Exception as e:
+            return [500, 'text/plain', f'proxy error: {str(e)}']
