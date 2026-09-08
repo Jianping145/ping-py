@@ -361,30 +361,56 @@ class Spider(BaseSpider):
             {"type_id": "514", "type_name": "小宝寻花"},
             {"type_id": "515", "type_name": "午夜寻花"},
             {"type_id": "516", "type_name": "91系列"},
-            # === 女优系列（保留） ===
-            {"type_id": "sortjp", "type_name": "女优系列"},
+            # === 女优系列（46位） ===
+            {"type_id": "401", "type_name": "夢乃愛華"},
+            {"type_id": "402", "type_name": "波多野结衣"},
+            {"type_id": "403", "type_name": "三上悠亚"},
+            {"type_id": "404", "type_name": "河北彩花"},
+            {"type_id": "405", "type_name": "高桥圣子"},
+            {"type_id": "406", "type_name": "葵司"},
+            {"type_id": "407", "type_name": "水卜櫻"},
+            {"type_id": "408", "type_name": "紗倉真菜"},
+            {"type_id": "409", "type_name": "桃乃木香奈"},
+            {"type_id": "410", "type_name": "安齋拉拉"},
+            {"type_id": "411", "type_name": "天使萌"},
+            {"type_id": "412", "type_name": "相泽南"},
+            {"type_id": "413", "type_name": "櫻空桃"},
+            {"type_id": "414", "type_name": "Miru"},
+            {"type_id": "415", "type_name": "羽咲美晴"},
+            {"type_id": "416", "type_name": "山岸逢花"},
+            {"type_id": "417", "type_name": "七澤米亞"},
+            {"type_id": "418", "type_name": "松本一香"},
+            {"type_id": "419", "type_name": "木下日葵"},
+            {"type_id": "420", "type_name": "二階堂夢"},
+            {"type_id": "421", "type_name": "田中宁宁"},
+            {"type_id": "422", "type_name": "藤森里穂"},
+            {"type_id": "423", "type_name": "稻场流花"},
+            {"type_id": "424", "type_name": "久留木玲"},
+            {"type_id": "425", "type_name": "有栖花绯"},
+            {"type_id": "426", "type_name": "沙月芽衣"},
+            {"type_id": "427", "type_name": "東條夏"},
+            {"type_id": "428", "type_name": "北野望"},
+            {"type_id": "429", "type_name": "明里紬"},
+            {"type_id": "430", "type_name": "天音真比奈"},
+            {"type_id": "431", "type_name": "早野詩"},
+            {"type_id": "432", "type_name": "篠田優"},
+            {"type_id": "433", "type_name": "神宮寺奈緒"},
+            {"type_id": "434", "type_name": "逢見梨花"},
+            {"type_id": "435", "type_name": "藍芽美月"},
+            {"type_id": "436", "type_name": "鈴木心春"},
+            {"type_id": "437", "type_name": "有坂深雪"},
+            {"type_id": "438", "type_name": "架乃由羅"},
+            {"type_id": "439", "type_name": "美之嶋惠理"},
+            {"type_id": "440", "type_name": "三宮椿"},
+            {"type_id": "441", "type_name": "川上奈奈美"},
+            {"type_id": "442", "type_name": "湊莉久"},
+            {"type_id": "443", "type_name": "小島南"},
+            {"type_id": "444", "type_name": "平手真菜"},
+            {"type_id": "445", "type_name": "新川爱七"},
+            {"type_id": "446", "type_name": "鷲尾芽衣"},
         ]
 
-        filters = {
-            "sortjp": [
-                {
-                    "key": "class",
-                    "name": "女优系列",
-                    "value": [
-                        {"n": "全部", "v": ""},
-                        {"n": "夢乃愛華", "v": "401"},
-                        {"n": "波多野结衣", "v": "402"},
-                        {"n": "河北彩花", "v": "404"},
-                        {"n": "桃乃木香奈", "v": "409"},
-                        {"n": "相泽南", "v": "412"},
-                        {"n": "Miru", "v": "414"},
-                        {"n": "木下日葵", "v": "419"},
-                        {"n": "明里紬", "v": "429"},
-                        {"n": "鷲尾芽衣", "v": "446"},
-                    ]
-                }
-            ]
-        }
+        filters = {}
 
         return {
             "class": classes,
@@ -404,36 +430,6 @@ class Spider(BaseSpider):
 
         try:
             actual_tid = tid
-
-            if tid == "sortjp":
-                ext_dict = self._parse_extend(extend)
-                sub_type = ext_dict.get("class", "") or ext_dict.get("sub_type", "")
-
-                if sub_type:
-                    actual_tid = str(sub_type)
-                    print("[%s] 女优系列 -> %s" % (self.name, actual_tid))
-                else:
-                    actual_tid = "401"
-                    print("[%s] 女优系列 -> 默认 401" % self.name)
-
-                result["filters"] = [
-                    {
-                        "key": "class",
-                        "name": "女优系列",
-                        "value": [
-                            {"n": "全部", "v": ""},
-                            {"n": "夢乃愛華", "v": "401"},
-                            {"n": "波多野结衣", "v": "402"},
-                            {"n": "河北彩花", "v": "404"},
-                            {"n": "桃乃木香奈", "v": "409"},
-                            {"n": "相泽南", "v": "412"},
-                            {"n": "Miru", "v": "414"},
-                            {"n": "木下日葵", "v": "419"},
-                            {"n": "明里紬", "v": "429"},
-                            {"n": "鷲尾芽衣", "v": "446"},
-                        ]
-                    }
-                ]
 
             pg_int = int(pg)
             if pg_int <= 1:
