@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# beeg.py - Beeg 源（FongMi Python 格式）
+# beeg.py - Beeg 源（FongMi Python 格式，全分类版）
 
 import sys, re, json, base64, threading, time
 
@@ -130,15 +130,111 @@ class Spider(BaseSpider):
 
         {'name': 'Family Strokes', 'slug': 'familystrokes'},
 
+        {'name': 'Ultra Films', 'slug': 'ultrafilms'},
+
+        {'name': 'Nubile Films', 'slug': 'nubilefilms'},
+
+        {'name': 'LetsDoeIt', 'slug': 'letsdoeit'},
+
+        {'name': 'Family XXX', 'slug': 'familyxxx'},
+
+        {'name': 'Tiny 4K', 'slug': 'tiny4k'},
+
+        {'name': 'New Sensations', 'slug': 'newsensations'},
+
+        {'name': 'Naughty America', 'slug': 'naughtyamerica'},
+
+        {'name': 'Sis Loves Me', 'slug': 'sislovesme'},
+
         {'name': 'Pure Taboo', 'slug': 'puretaboo'},
+
+        {'name': 'Step Siblings Caught', 'slug': 'stepsiblingscaught'},
+
+        {'name': 'Moms Teach Sex', 'slug': 'momsteachsex'},
+
+        {'name': 'Hot Wife XXX', 'slug': 'hotwifexxx'},
+
+        {'name': 'Porn Force', 'slug': 'pornforce'},
+
+        {'name': 'Dorcel Club', 'slug': 'dorcelclub'},
+
+        {'name': 'Vixen Plus', 'slug': 'vixenplus'},
+
+        {'name': 'My Family Pies', 'slug': 'myfamilypies'},
+
+        {'name': "My Friend's Hot Mom", 'slug': 'myfriendshotmom'},
+
+        {'name': 'Bare Back Studios', 'slug': 'barebackstudios'},
+
+        {'name': 'NF Busty', 'slug': 'nfbusty'},
+
+        {'name': 'Passion HD', 'slug': 'passionhd'},
+
+        {'name': '21 Naturals', 'slug': '21naturals'},
+
+        {'name': 'Teen Fidelity', 'slug': 'teenfidelity'},
 
         {'name': 'Tushy', 'slug': 'tushy'},
 
+        {'name': 'Porn World', 'slug': 'pornworld'},
+
+        {'name': 'Cum 4K', 'slug': 'cum4k'},
+
+        {'name': 'My Pervy Family', 'slug': 'mypervyfamily'},
+
+        {'name': 'Porn Fidelity', 'slug': 'pornfidelity'},
+
+        {'name': 'NVG', 'slug': 'nvg'},
+
+        {'name': 'Exploited College Girls', 'slug': 'exploitedcollegegirls'},
+
         {'name': 'Deeper', 'slug': 'deeperofficial'},
+
+        {'name': 'Bellesa Plus', 'slug': 'bellesaplus'},
+
+        {'name': 'Princess Cum', 'slug': 'princesscum'},
+
+        {'name': 'White Boxxx', 'slug': 'whiteboxxx'},
+
+        {'name': 'Pure Mature', 'slug': 'puremature'},
+
+        {'name': 'Perv Mom', 'slug': 'pervmom'},
 
         {'name': 'Blacked Raw', 'slug': 'blackedraw'},
 
+        {'name': 'Mom Wants to Breed', 'slug': 'momwantstobreed'},
+
+        {'name': '21 Sextury', 'slug': '21sextury'},
+
+        {'name': 'Hegre', 'slug': 'hegre'},
+
+        {'name': 'Life Selector', 'slug': 'lifeselector'},
+
+        {'name': 'Exxxtra Small', 'slug': 'exxtrasmall'},
+
+        {'name': 'JAV HD', 'slug': 'javhd'},
+
+        {'name': 'Girl Cum', 'slug': 'girlcumofficial'},
+
+        {'name': 'Sex Art', 'slug': 'sexart'},
+
+        {'name': "Tonight's Girlfriend", 'slug': 'tonightsgirlfriend'},
+
+        {'name': 'Dad Crush', 'slug': 'dadcrush'},
+
+        {'name': 'Lubed', 'slug': 'lubedcom'},
+
+        {'name': 'VIP 4K', 'slug': 'vip4k'},
+
         {'name': 'Evil Angel', 'slug': 'evilangel'},
+
+        {'name': 'JAV Hub', 'slug': 'javhub'},
+
+        {'name': 'Caribbeancom', 'slug': 'caribbeancom'},
+
+        {'name': "My Sister's Hot Friend", 'slug': 'mysistershotfriend'},
+
+        {'name': 'Daughter Swap', 'slug': 'daughterswap'},
 
     ]
 
@@ -148,21 +244,199 @@ class Spider(BaseSpider):
 
         {'name': 'Angela White', 'slug': 'angelawhite'},
 
+        {'name': 'Dani Daniels', 'slug': 'danidaniels'},
+
         {'name': 'Mia Malkova', 'slug': 'miamalkova'},
 
         {'name': 'Riley Reid', 'slug': 'rileyreid'},
+
+        {'name': 'Mila Lioness', 'slug': 'milalioness'},
+
+        {'name': 'Alexa Grace', 'slug': 'alexagrace'},
+
+        {'name': 'Alina Lopez', 'slug': 'alinalopez'},
+
+        {'name': 'Comatozze', 'slug': 'comatozze'},
+
+        {'name': 'Candy Love', 'slug': 'candylove'},
+
+        {'name': 'Diana Rider', 'slug': 'dianarider'},
 
         {'name': 'Sweetie Fox', 'slug': 'sweetiefox'},
 
         {'name': 'Lana Rhoades', 'slug': 'lanarhoades'},
 
+        {'name': 'Julie Jess', 'slug': 'juliejess'},
+
+        {'name': 'Anny Walker', 'slug': 'annywalker'},
+
+        {'name': 'Angel X', 'slug': 'angelx'},
+
+        {'name': 'Shinaryen', 'slug': 'shinaryen'},
+
         {'name': 'Abella Danger', 'slug': 'abelladanger'},
+
+        {'name': 'Sybil', 'slug': 'sybil'},
+
+        {'name': 'Emilia Bunny', 'slug': 'emiliabunny'},
+
+        {'name': 'Syndicete', 'slug': 'syndicete'},
+
+        {'name': 'Jenny Kitty', 'slug': 'jennykitty'},
 
         {'name': 'Emily Willis', 'slug': 'emilywillis'},
 
         {'name': 'Elsa Jean', 'slug': 'elsajean'},
 
+        {'name': 'Nicole Aniston', 'slug': 'nicoleaniston'},
+
+        {'name': 'Fantasy Babe', 'slug': 'fantasybabe'},
+
+        {'name': 'Lena Paul', 'slug': 'lenapaul'},
+
+        {'name': 'Bonnie Blaze', 'slug': 'bonnieblaze'},
+
+        {'name': 'Cory Chase', 'slug': 'corychase'},
+
+        {'name': 'Martin & Paola', 'slug': 'martinpaola'},
+
+        {'name': 'Dick For Lily', 'slug': 'dickforlily'},
+
+        {'name': 'Gabbie Carter', 'slug': 'gabbiecarter'},
+
+        {'name': 'Lexi Lore', 'slug': 'lexilore'},
+
+        {'name': 'Kate Kuray', 'slug': 'katekuray'},
+
+        {'name': 'Blake Blossom', 'slug': 'blakeblossom'},
+
+        {'name': 'Carla Cute', 'slug': 'carlacute'},
+
+        {'name': 'Hotties Two', 'slug': 'hottiestwo'},
+
+        {'name': 'Adriana Chechik', 'slug': 'adrianachechik'},
+
+        {'name': 'Yummy Mira', 'slug': 'yummymira'},
+
+        {'name': 'Reislin', 'slug': 'reislin'},
+
+        {'name': 'Anastangel', 'slug': 'anastangel'},
+
+        {'name': 'Gina Valentina', 'slug': 'ginavalentina'},
+
+        {'name': 'Kenzie Reeves', 'slug': 'kenzie_reeves'},
+
+        {'name': 'Valentina Nappi', 'slug': 'valentinanappi'},
+
+        {'name': 'Leah Meow', 'slug': 'leahmeow'},
+
+        {'name': 'Carry Light', 'slug': 'carrylight'},
+
+        {'name': 'Purple Bitch', 'slug': 'purplebitch'},
+
+        {'name': 'Pink Loving', 'slug': 'pinkloving'},
+
+        {'name': 'My Anny', 'slug': 'myanny'},
+
+        {'name': 'Lil Karina', 'slug': 'lilkarina'},
+
+        {'name': 'Melody Marks', 'slug': 'melodymarks'},
+
+        {'name': 'Luxury Mur', 'slug': 'luxurymur'},
+
+        {'name': 'Diana Daniels', 'slug': 'danadaniels'},
+
+        {'name': 'Stacy Cruz', 'slug': 'stacycruz'},
+
+        {'name': 'Allinika', 'slug': 'allinika'},
+
+        {'name': 'Autumn Falls', 'slug': 'autumnfalls'},
+
+        {'name': 'Sola Zola', 'slug': 'solazola'},
+
+        {'name': 'Krystal Boyd', 'slug': 'krystalboyd'},
+
+        {'name': 'Lexi Luna', 'slug': 'lexiluna'},
+
+        {'name': 'Lauren Phillips', 'slug': 'laurenphillips'},
+
+        {'name': 'Kera Bear', 'slug': 'kerabear'},
+
         {'name': 'Little Caprice', 'slug': 'littlecaprice'},
+
+        {'name': 'Sia Siberia', 'slug': 'siasiberia'},
+
+        {'name': 'Molly Red Wolf', 'slug': 'mollyredwolf'},
+
+        {'name': 'Samantha Flair', 'slug': 'samanthaflair'},
+
+        {'name': 'Luxury Girl', 'slug': 'luxurygirl'},
+
+        {'name': 'Molly Little', 'slug': 'mollylittle'},
+
+        {'name': 'Kelly Aleman', 'slug': 'kellyaleman'},
+
+        {'name': 'Yinyleon', 'slug': 'yinyleon'},
+
+        {'name': 'Liya Silver', 'slug': 'liyasilver'},
+
+        {'name': 'Telari Love', 'slug': 'telarilove'},
+
+        {'name': 'Skye Young', 'slug': 'skyeyoung'},
+
+        {'name': 'Tru Kait', 'slug': 'trukait'},
+
+        {'name': 'Eliza Ibarra', 'slug': 'elizaibarra'},
+
+        {'name': 'Jenny Lux', 'slug': 'jennylux'},
+
+        {'name': 'Anissa Kate', 'slug': 'anissakate'},
+
+        {'name': 'Haley Reed', 'slug': 'haleyreed'},
+
+        {'name': 'Kyler Quinn', 'slug': 'kylerquinn'},
+
+        {'name': 'Skylar Vox', 'slug': 'skylarvox'},
+
+        {'name': 'Leah Gotti', 'slug': 'leahgotti'},
+
+        {'name': 'Lina Migurtt', 'slug': 'linamigurtt'},
+
+        {'name': 'Dillion Harper', 'slug': 'dillionharper'},
+
+        {'name': 'Brandi Love', 'slug': 'brandilove'},
+
+        {'name': 'Jia Lissa', 'slug': 'jialissa'},
+
+        {'name': 'Brooke Tilli', 'slug': 'brooketilli'},
+
+        {'name': 'Miss Lexa', 'slug': 'misslexa'},
+
+        {'name': 'Bunny Rabbits', 'slug': 'bunnyrabbits'},
+
+        {'name': 'Leo Lulu', 'slug': 'leolulu'},
+
+        {'name': 'Layla Ray', 'slug': 'laylaray'},
+
+        {'name': 'Web To Love', 'slug': 'webtolove'},
+
+        {'name': 'Nancy Ace', 'slug': 'nancyace'},
+
+        {'name': 'Hansel & Grettel', 'slug': 'hanselgrettel'},
+
+        {'name': 'Xreindeers', 'slug': 'xreindeers'},
+
+        {'name': 'Tiffany Tatum', 'slug': 'tiffanystatum'},
+
+        {'name': 'Mirari', 'slug': 'mirari'},
+
+        {'name': 'Adria Rae', 'slug': 'adriarae'},
+
+        {'name': 'Kristel Jack', 'slug': 'kristeljack'},
+
+        {'name': 'Mila Solana', 'slug': 'milasolana'},
+
+        {'name': 'Alexis Fawx', 'slug': 'alexisfawx'},
 
     ]
 
@@ -386,8 +660,6 @@ class Spider(BaseSpider):
 
         qualities = []
 
-        # 优先 fl_cdn_multi（含 1080p）
-
         multi = hls.get('fl_cdn_multi')
 
         if multi:
@@ -471,8 +743,6 @@ class Spider(BaseSpider):
         query_words = [w for w in re.split(r'[^a-z0-9]+', key.lower()) if len(w) >= 2]
 
         cards, seen = [], set()
-
-        # 只查第一页加速（如需翻页可改）
 
         offset = (page - 1) * 48
 
