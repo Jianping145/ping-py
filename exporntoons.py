@@ -8,6 +8,20 @@ import requests
 
 from urllib.parse import quote
 
+import sys
+
+sys.path.append('..')
+
+try:
+
+    from base.spider import Spider as BaseSpider
+
+except ImportError:
+
+    class BaseSpider:
+
+        pass
+
 UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_2 like Mac OS X) AppleWebKit/604.1.14 (KHTML, like Gecko) Version/18.2 Mobile/15E148 Safari/604.1'
 
 SITE = 'https://exporntoons.net'
@@ -190,11 +204,13 @@ TAG_CLASSES = [
 
     {"type_id": 'video/piss+asiticas', "type_name": 'Piss Asiticas'},
 
-    {"type_id": 'video/fc2ppv+4556190', "type_name": 'Fc2Ppv 4556190'}
+    {"type_id": 'video/fc2ppv+4556190', "type_name": 'Fc2Ppv 4556190'},
 
 ]
 
-class Spider:
+# ============ 原始逻辑（内部使用） ============
+
+class _OldSpider:
 
     def __init__(self):
 
@@ -208,7 +224,7 @@ class Spider:
 
         try:
 
-            r = requests.get(url, headers=headers, timeout=15)
+            r = requests.get(url, headers=headers, timeout=15, verify=False)
 
             r.raise_for_status()
 
@@ -318,13 +334,19 @@ class Spider:
 
             if title_match:
 
-                title = re.sub(r'\s*[-|]\s*ExPornToons.*$', '', title_match.group(1), flags=re.I).strip()
+                title = re.sub(r'\s*[-|]\s*ExPornToons.*$', '',
+
+                               title_match.group(1), flags=re.I).strip()
 
             else:
 
                 title = 'Video'
 
-            pic_match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', html, re.I)
+            pic_match = re.search(
+
+                r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+
+                html, re.I)
 
             pic = pic_match.group(1) if pic_match else ''
 
@@ -338,7 +360,9 @@ class Spider:
 
             quality_map = {}
 
-            cdn_regex = re.compile(r'(https?://[^"\'\s\\<>]*pvvstream\.pro[^"\'\s\\<>]*)')
+            cdn_regex = re.compile(
+
+                r'(https?://[^"\'\s\\<>]*pvvstream\.pro[^"\'\s\\<>]*)')
 
             for m in cdn_regex.finditer(html):
 
@@ -352,7 +376,11 @@ class Spider:
 
                     continue
 
-                q_match = re.search(r'vid_(\d+)p', u) or re.search(r'/(\d+)p/', u) or re.search(r'_(\d+)p\.', u)
+                q_match = (re.search(r'vid_(\d+)p', u)
+
+                           or re.search(r'/(\d+)p/', u)
+
+                           or re.search(r'_(\d+)p\.', u))
 
                 if not q_match:
 
@@ -380,7 +408,9 @@ class Spider:
 
             if not play_urls:
 
-                vf_regex = re.compile(r'(https?://[^"\'\s\\<>]*/videofile/[^"\'\s\\<>]+\.mp4[^"\'\s\\<>]*)')
+                vf_regex = re.compile(
+
+                    r'(https?://[^"\'\s\\<>]*/videofile/[^"\'\s\\<>]+\.mp4[^"\'\s\\<>]*)')
 
                 for m in vf_regex.finditer(html):
 
@@ -482,7 +512,11 @@ class Spider:
 
         seen = set()
 
-        card_regex = re.compile(r'<a[^>]+href=["\']([^"\']*\/watch\/[^"\']+)["\'][^>]*>([\s\S]*?)</a>', re.I)
+        card_regex = re.compile(
+
+            r'<a[^>]+href=["\']([^"\']*\/watch\/[^"\']+)["\'][^>]*>([\s\S]*?)</a>',
+
+            re.I)
 
         for m in card_regex.finditer(html):
 
@@ -496,7 +530,11 @@ class Spider:
 
             seen.add(href)
 
-            img_match = re.search(r'<img[^>]+(?:data-src|data-original|src)=["\']([^"\']+)["\']', inner, re.I)
+            img_match = re.search(
+
+                r'<img[^>]+(?:data-src|data-original|src)=["\']([^"\']+)["\']',
+
+                inner, re.I)
 
             pic = img_match.group(1).replace('&amp;', '&') if img_match else ''
 
@@ -504,7 +542,9 @@ class Spider:
 
                 pic = ''
 
-            title_match = re.search(r'alt=["\']([^"\']+)["\']', inner, re.I) or re.search(r'title=["\']([^"\']+)["\']', inner, re.I)
+            title_match = (re.search(r'alt=["\']([^"\']+)["\']', inner, re.I)
+
+                           or re.search(r'title=["\']([^"\']+)["\']', inner, re.I))
 
             title = title_match.group(1).strip() if title_match else ''
 
@@ -541,3 +581,167 @@ class Spider:
             })
 
         return list_data
+
+# ============ 蜂蜜/FongMi 适配层 ============
+
+class Spider(BaseSpider):
+
+    def __init__(self):
+
+        try:
+
+            super().__init__()
+
+        except Exception:
+
+            pass
+
+        self._old = _OldSpider()
+
+    def getName(self):
+
+        return 'exporntoons'
+
+    def isVideoFormat(self, url):
+
+        return '.m3u8' in url or '.mp4' in url
+
+    def manualVideoCheck(self):
+
+        return False
+
+    def destroy(self):
+
+        pass
+
+    def localProxy(self, param):
+
+        return [404, 'text/plain', '']
+
+    def init(self, extend=''):
+
+        try:
+
+            self._old.init(extend)
+
+        except Exception as e:
+
+            print('init error: ' + str(e))
+
+        return
+
+    @staticmethod
+
+    def _to_obj(s):
+
+        if isinstance(s, (dict, list)):
+
+            return s
+
+        try:
+
+            return json.loads(s)
+
+        except Exception:
+
+            return {}
+
+    def homeContent(self, filter=None):
+
+        obj = self._to_obj(self._old.homeContent(filter))
+
+        obj.setdefault('class', [])
+
+        obj.setdefault('filters', {})
+
+        return obj
+
+    def homeVideoContent(self):
+
+        obj = self._to_obj(self._old.homeVideoContent())
+
+        obj.setdefault('list', [])
+
+        return obj
+
+    def categoryContent(self, tid, pg, filter, extend):
+
+        obj = self._to_obj(self._old.categoryContent(tid, pg, filter, extend))
+
+        obj.setdefault('list', [])
+
+        obj.setdefault('page', int(pg) if pg else 1)
+
+        obj.setdefault('pagecount', obj['page'] + 1)
+
+        obj.setdefault('limit', len(obj['list']))
+
+        obj.setdefault('total', 9999)
+
+        return obj
+
+    def detailContent(self, ids):
+
+        obj = self._to_obj(self._old.detailContent(ids))
+
+        obj.setdefault('list', [])
+
+        return obj
+
+    def playerContent(self, flag, id, vipFlags=None):
+
+        obj = self._to_obj(self._old.playerContent(flag, id, vipFlags))
+
+        h = obj.get('header')
+
+        if isinstance(h, str):
+
+            try:
+
+                obj['header'] = json.loads(h)
+
+            except Exception:
+
+                obj['header'] = {
+
+                    'User-Agent': UA,
+
+                    'Referer': SITE + '/',
+
+                    'Origin': SITE
+
+                }
+
+        elif not isinstance(h, dict):
+
+            obj['header'] = {
+
+                'User-Agent': UA,
+
+                'Referer': SITE + '/',
+
+                'Origin': SITE
+
+            }
+
+        obj.setdefault('parse', 0)
+
+        obj.setdefault('url', '')
+
+        return obj
+
+    def searchContent(self, key, quick, pg='1'):
+
+        obj = self._to_obj(self._old.searchContent(key, quick))
+
+        obj.setdefault('list', [])
+
+        obj.setdefault('page', int(pg) if pg else 1)
+
+        obj.setdefault('pagecount', obj['page'] + 1)
+
+        obj.setdefault('limit', len(obj['list']))
+
+        obj.setdefault('total', len(obj['list']))
+
+        return obj
