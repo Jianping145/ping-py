@@ -1261,25 +1261,11 @@ class ZheTian_Master(YuanTianShu):
                 return {"parse": 0, "url": "", "header": json.dumps({"User-Agent": ua}), "jx": 0}
 
             sid = str(id)
-            # 已是直链（二次回调或上游已解）
-            if ".m3u8" in sid or "tnmr.org" in sid or sid.endswith(".mp4"):
-                print("[playerContent] 已是直链，走 localProxy 代理播放")
-                low_sid = sid.lower()
-                if "tnmr.org" in low_sid or "dsvplay" in low_sid or "streamwish" in low_sid or "filelions" in low_sid:
-                    hdr = self._dsvplay_play_header("https://dsvplay.com")
-                    print("[playerContent] dsvplay 系 -> 代理+dsvplay header")
-                else:
-                    hdr = self._lulu_play_header("https://lulust.com")
-                    print("[playerContent] luluvdo 系 -> 代理+lulu header")
-                # ★ 关键：直链走 localProxy，由 Python 带 Referer 拉流
-                proxied_url = self._proxy_media_url(sid)
-                return {
-                    "parse": 0,
-                    "url": proxied_url,
-                    "header": hdr,
-                    "jx": 0,
-                }
+            low_sid = sid.lower()
 
+            # ═══════════════════════════════════════════════════
+            # 第0层：actor 页面
+            # ═══════════════════════════════════════════════════
             if sid.startswith("actor::"):
                 return {
                     "parse": 1,
@@ -1288,35 +1274,67 @@ class ZheTian_Master(YuanTianShu):
                     "jx": 0,
                 }
 
-            # 作品列表 / 详情页给的是 netfapx watch 地址，需先抓页取 iframe
+            # ═══════════════════════════════════════════════════
+            # 第1层：已是视频直链（m3u8/mp4）
+            # ═══════════════════════════════════════════════════
+            if ".m3u8" in sid or sid.endswith(".mp4") or ".mp4?" in sid:
+                print("[playerContent] 已是视频直链")
+                # 判断 CDN 类型
+                is_tnmr = "tnmr.org" in low_sid or "dsvplay" in low_sid or "streamwish" in low_sid or "filelions" in low_sid
+                is_lulu = "lulu" in low_sid or "lulust" in low_sid or "luluvdo" in low_sid
+                is_cloud = "cloudatacdn" in low_sid or "cloudflare" in low_sid
+
+                if is_cloud:
+                    # cloudatacdn 不校验 Referer，直接播放
+                    print("[playerContent] cloudatacdn 直链，直接播放")
+                    return {"parse": 0, "url": sid, "header": json.dumps({"User-Agent": ua}), "jx": 0}
+
+                # 其他 CDN 尝试走 localProxy 代理
+                proxied = self._proxy_media_url(sid)
+                if proxied != sid:
+                    print("[playerContent] 直链走 localProxy 代理")
+                    return {"parse": 0, "url": proxied, "header": json.dumps({"User-Agent": ua}), "jx": 0}
+
+                # localProxy 不可用，尝试直接播放（部分 CDN 不校验 Referer）
+                print("[playerContent] localProxy 不可用，尝试直接播放")
+                hdr = json.dumps({"User-Agent": ua, "Referer": "https://dsvplay.com/" if is_tnmr else "https://lulust.com/"})
+                return {"parse": 0, "url": sid, "header": hdr, "jx": 0}
+
+            # ═══════════════════════════════════════════════════
+            # 第2层：netfapx 详情页 → 提取嵌入页
+            # ═══════════════════════════════════════════════════
             if "netfapx.net" in sid and "/watch/" in sid:
                 print("[playerContent] netfapx 详情页，提取嵌入")
                 try:
                     html = self.fetch(sid, referer=str(self.siteUrl))
                     embed = None
                     if html:
+                        # 提取 iframe
                         for m in re.finditer(r'<iframe[^>]+src=["\']([^"\']+)["\']', html, re.I):
                             src = m.group(1).strip()
                             if src.startswith("//"):
                                 src = "https:" + src
                             low = src.lower()
-                            if any(x in low for x in ("lulu", "dood", "do7go", "playmogo", "vide0", "stream", "/e/", "embed")):
+                            if any(x in low for x in ("lulu", "dood", "do7go", "playmogo", "vide0", "dsvplay", "streamwish", "filelions", "/e/", "embed", "myvidplay")):
                                 if "tsyndicate" in low or "ads" in low:
                                     continue
                                 embed = src
                                 break
+                        # 正则提取嵌入域名
                         if not embed:
-                            m = re.search(r'https?://(?:www\.)?(?:lulu[^\s"\'<>]+|dood[^\s"\'<>]+|do7go\.com[^\s"\'<>]*)', html, re.I)
+                            m = re.search(r'https?://(?:www\.)?(?:lulu[^\s"\'<>]+|dood[^\s"\'<>]+|do7go\.com[^\s"\'<>]*|dsvplay\.com[^\s"\'<>]*|myvidplay\.com[^\s"\'<>]*|streamwish\.com[^\s"\'<>]*|filelions\.com[^\s"\'<>]*)', html, re.I)
                             if m:
                                 embed = m.group(0)
                     if embed:
                         print("[playerContent] 详情页嵌入: " + embed[:100])
-                        # 递归走嵌入解析
                         return self.playerContent(flag, embed, vipFlags)
                     print("[playerContent] 详情页未找到嵌入")
                 except Exception as e:
                     print("[playerContent] 详情页解析异常: " + str(e))
 
+            # ═══════════════════════════════════════════════════
+            # 第3层：嵌入页解析
+            # ═══════════════════════════════════════════════════
             embed_signs = ["/e/", "/embed/", "/player/", "/stream/", "/v/"]
             luluvdo_domains = getattr(self, "luluvdo_domains", [
                 "luluvdo.com", "lulustream.com", "lulust.com", "lulucdn.com",
@@ -1324,61 +1342,82 @@ class ZheTian_Master(YuanTianShu):
             ])
             doodstream_domains = getattr(self, "doodstream_domains", [
                 "dood.to", "dood.so", "dood.watch", "doply.net", "do7go.com",
+                "playmogo.com", "doodstream.com", "myvidplay.com",
             ])
+            dsvplay_domains = ["dsvplay.com", "streamwish.com", "filelions.com", "lvturbo.com", "wishfast.com", "myvidplay.com"]
             embed_domains = getattr(self, "embed_domains", ["streamtape", "mixdrop"])
-            all_embed_domains = embed_domains + doodstream_domains + luluvdo_domains
-            is_embed = any(s in sid for s in embed_signs) or any(
-                d in sid.lower() for d in all_embed_domains
-            )
+            all_embed_domains = embed_domains + doodstream_domains + luluvdo_domains + dsvplay_domains
+
+            is_embed = any(s in sid for s in embed_signs) or any(d in low_sid for d in all_embed_domains)
             print("[playerContent] is_embed=" + str(is_embed))
+
             if is_embed:
                 print("[兵字秘] 嵌入页: " + sid[:80])
+
+                # ── 3.1 尝试预解析嵌入页 ──
                 real_url = self._parse_embed_page(sid)
                 print("[兵字秘] real_url=" + (str(real_url)[:100] if real_url else "None"))
-                is_lulu = any(d in sid.lower() for d in luluvdo_domains) or ("lulu" in sid.lower())
-                is_dsv = any(d in sid.lower() for d in ["dsvplay", "streamwish", "filelions", "lvturbo", "wishfast"])
-                if real_url and (is_lulu or is_dsv or ".m3u8" in str(real_url) or ".mp4" in str(real_url)):
-                    if is_dsv:
-                        hdr = self._dsvplay_play_header(sid)
-                    else:
-                        hdr = self._lulu_play_header(sid)
+
+                is_lulu = any(d in low_sid for d in luluvdo_domains) or ("lulu" in low_sid)
+                is_dsv = any(d in low_sid for d in dsvplay_domains)
+                is_dood = any(d in low_sid for d in doodstream_domains)
+
+                if real_url:
                     play = str(real_url)
+                    # master.m3u8 → 最高清晰度
                     if "master.m3u8" in play:
-                        play = self._resolve_media_m3u8(play, hdr)
-                    # ★ 关键：解析出的直链也走 localProxy
-                    play = self._proxy_media_url(play)
-                    print("[兵字秘] 预解析成功 parse=0 play=" + play[:100])
+                        play = self._resolve_media_m3u8(play, None)
+
+                    # 判断解析结果的 CDN 类型
+                    play_low = play.lower()
+
+                    if "cloudatacdn" in play_low:
+                        # cloudatacdn 不校验 Referer，直接播放
+                        print("[兵字秘] cloudatacdn 解析结果，直接播放")
+                        return {"parse": 0, "url": play, "header": json.dumps({"User-Agent": ua}), "jx": 0}
+
+                    # 尝试走 localProxy 代理
+                    proxied = self._proxy_media_url(play)
+                    if proxied != play:
+                        print("[兵字秘] 解析结果走 localProxy: " + proxied[:80])
+                        return {"parse": 0, "url": proxied, "header": json.dumps({"User-Agent": ua}), "jx": 0}
+
+                    # localProxy 不可用，直接播放（带 Referer 碰碰运气）
+                    print("[兵字秘] localProxy 不可用，直接播放: " + play[:80])
+                    if is_dsv or "tnmr.org" in play_low:
+                        hdr = json.dumps({"User-Agent": ua, "Referer": "https://dsvplay.com/"})
+                    elif is_lulu:
+                        hdr = json.dumps({"User-Agent": ua, "Referer": "https://lulust.com/"})
+                    else:
+                        hdr = json.dumps({"User-Agent": ua, "Referer": str(self.siteUrl)})
                     return {"parse": 0, "url": play, "header": hdr, "jx": 0}
-                if real_url and (self.isVideoFormat(real_url) or ".m3u8" in real_url or ".mp4" in real_url):
-                    print("[兵字秘] 预解析成功 parse=0")
+
+                # ── 3.2 预解析失败，尝试用 localProxy 代理嵌入页本身 ──
+                # 让 TVBox 通过 localProxy 加载嵌入页，由 Python 带 Referer 请求
+                # 嵌入页里的播放器会自动请求视频，Python 代理会带上正确的 Referer
+                print("[兵字秘] 预解析失败，尝试代理嵌入页")
+                proxied_embed = self._proxy_media_url(sid)
+                if proxied_embed != sid:
+                    print("[兵字秘] 嵌入页走 localProxy: " + proxied_embed[:80])
                     return {
                         "parse": 0,
-                        "url": real_url,
+                        "url": proxied_embed,
                         "header": json.dumps({"User-Agent": ua, "Referer": str(self.siteUrl)}),
                         "jx": 0,
                     }
-                # DoodStream 解析失败：返回嵌入页+header，让播放器直接加载
-                is_dood = any(d in sid.lower() for d in doodstream_domains)
-                if is_dood:
-                    print("[兵字秘] DoodStream 解析失败，返回嵌入页 parse=0")
-                    return {
-                        "parse": 0,
-                        "url": sid,
-                        "header": json.dumps({
-                            "User-Agent": ua,
-                            "Referer": str(self.siteUrl),
-                            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                            "Accept-Language": "en-US,en;q=0.9",
-                        }),
-                        "jx": 0,
-                    }
-                print("[兵字秘] 预解析失败，改嗅探 parse=1 jx=0")
+
+                # ── 3.3 localProxy 也不可用，返回嵌入页让 TVBox 处理 ──
+                print("[兵字秘] localProxy 不可用，返回嵌入页 parse=0")
                 return {
-                    "parse": 1,
+                    "parse": 0,
                     "url": sid,
                     "header": json.dumps({"User-Agent": ua, "Referer": str(self.siteUrl)}),
                     "jx": 0,
                 }
+
+            # ═══════════════════════════════════════════════════
+            # 第4层：非嵌入，直接返回
+            # ═══════════════════════════════════════════════════
             print("[playerContent] 非嵌入 parse=0")
             return {
                 "parse": 0,
@@ -1400,7 +1439,6 @@ class ZheTian_Master(YuanTianShu):
                 "jx": 0,
             }
 
-
     def searchContent(self, key, quick, pg="1"):
         try:
             keyword = parse.quote(key.replace(" ", "+"))
@@ -1413,7 +1451,7 @@ class ZheTian_Master(YuanTianShu):
         return self.searchContent(key, quick, pg)
 
     def localProxy(self, param):
-        """代理 m3u8/ts：带 Referer 拉取，重写 m3u8 内相对路径为代理地址"""
+        """代理 m3u8/ts/嵌入页：带 Referer 拉取，重写 m3u8 内相对路径为代理地址"""
         try:
             url = param.get("url") or param.get("path") or ""
             if not url:
@@ -1427,12 +1465,19 @@ class ZheTian_Master(YuanTianShu):
 
             # 根据目标域名选择 header
             low_url = str(url).lower()
-            if "tnmr.org" in low_url or "dsvplay" in low_url or "streamwish" in low_url or "filelions" in low_url:
+            if "tnmr.org" in low_url or "dsvplay" in low_url or "streamwish" in low_url or "filelions" in low_url or "myvidplay" in low_url:
                 hdr = json.loads(self._dsvplay_play_header("https://dsvplay.com"))
                 print("[proxy] dsvplay header")
             elif "lulu" in low_url or "lulust" in low_url or "luluvdo" in low_url:
                 hdr = json.loads(self._lulu_play_header("https://lulust.com"))
                 print("[proxy] lulu header")
+            elif "dood" in low_url or "playmogo" in low_url or "do7go" in low_url:
+                hdr = {
+                    "User-Agent": self.headers.get("User-Agent", "Mozilla/5.0"),
+                    "Referer": "https://" + parse.urlparse(url).netloc + "/",
+                    "Accept": "*/*",
+                }
+                print("[proxy] dood header")
             else:
                 hdr = json.loads(self._lulu_play_header("https://lulust.com"))
 
@@ -1441,7 +1486,7 @@ class ZheTian_Master(YuanTianShu):
             content = resp.content or b""
             ctype = resp.headers.get("Content-Type") or "application/vnd.apple.mpegurl"
 
-            # m3u8 内容：重写相对路径为代理地址（让 TVBox 继续走 localProxy 拉分片）
+            # m3u8 内容：重写相对路径为代理地址
             if b"#EXTM3U" in content[:20] or "mpegurl" in ctype or ".m3u8" in url:
                 try:
                     text_body = content.decode("utf-8", "ignore")
@@ -1450,11 +1495,10 @@ class ZheTian_Master(YuanTianShu):
                         s = line.strip()
                         if s and not s.startswith("#"):
                             if not s.startswith("http"):
-                                # 相对路径 -> 绝对路径
                                 abs_url = parse.urljoin(url, s)
                             else:
                                 abs_url = s
-                            # ★ 分片也走代理（带 Referer）
+                            # 分片也走代理（带 Referer）
                             proxied = self._proxy_media_url(abs_url)
                             lines.append(proxied)
                         else:
@@ -1464,6 +1508,25 @@ class ZheTian_Master(YuanTianShu):
                 except Exception as e:
                     print("[proxy] rewrite fail: " + str(e))
 
+            # 嵌入页 HTML：重写其中的资源地址为代理地址
+            elif "text/html" in ctype:
+                try:
+                    text_body = content.decode("utf-8", "ignore")
+                    # 重写 video/src 地址
+                    def repl_url(m):
+                        u = m.group(1)
+                        if u.startswith("//"):
+                            u = "https:" + u
+                        elif u.startswith("/"):
+                            u = parse.urljoin(url, u)
+                        if u.startswith("http") and (".m3u8" in u or ".mp4" in u or "tnmr.org" in u or "dsvplay" in u):
+                            return m.group(0).replace(m.group(1), self._proxy_media_url(u))
+                        return m.group(0)
+                    text_body = re.sub(r'["\'](https?://[^"\']+)["\']', repl_url, text_body)
+                    content = text_body.encode("utf-8")
+                except Exception as e:
+                    print("[proxy] html rewrite fail: " + str(e))
+
             print("[proxy] ok len=" + str(len(content)) + " ctype=" + str(ctype))
             return [200, ctype, hdr, content]
         except Exception as e:
@@ -1471,6 +1534,7 @@ class ZheTian_Master(YuanTianShu):
             import traceback
             traceback.print_exc()
             return [500, "text/plain", {}, str(e).encode("utf-8")]
+
 
 
 class Spider(ZheTian_Master):
