@@ -159,6 +159,9 @@ class ZheTian_Master(YuanTianShu):
             "doodstream.com", "playmogo.com", "doodcdn.com",
             "doply.net", "do7go.com", "dooodster.com", "vide0.net", "d0000d.com",
             "d000d.com", "dood.li", "dood.work", "doods.yt",
+            "doodstream.co", "doodstream.link", "doodstream.me",
+            "doodstream.to", "doodstream.so", "doodstream.cc",
+            "doodstream.click", "doodstream.download",
         ]
 
         # 其他嵌入播放器
@@ -669,7 +672,15 @@ class ZheTian_Master(YuanTianShu):
             if is_dood:
                 print("[兵字秘] 检测到 DoodStream")
                 return self._parse_doodstream(embed_url)
-            # 未知域名但有 packer，按 lulu 解
+
+            dsvplay_domains = ["dsvplay", "streamwish", "filelions", "lvturbo", "wishfast"]
+            if any(d in low for d in dsvplay_domains):
+                print("[兵字秘] 检测到 dsvplay/streamwish 系，尝试 packer 解码")
+                result = self._parse_dsvplay(embed_url)
+                if result:
+                    return result
+                print("[兵字秘] dsvplay packer 解码失败，回退通用")
+
             print("[兵字秘] 未知嵌入，先试通用再试 packer")
             generic = self._parse_generic_embed(embed_url)
             if generic:
@@ -757,78 +768,274 @@ class ZheTian_Master(YuanTianShu):
 
 
     def _parse_doodstream(self, embed_url):
+        """
+        DoodStream 解析 v2 - 支持 playmogo/do7go/vide0 等新镜像
+        """
         try:
             print("[doodstream] 解析: " + str(embed_url))
             site_url = getattr(self, 'siteUrl', "https://netfapx.net")
-            html = self.fetch(embed_url, headers={"Referer": site_url}, referer=site_url)
+
+            fetch_url = str(embed_url)
+            if "/d/" in fetch_url and "/e/" not in fetch_url:
+                fetch_url = fetch_url.replace("/d/", "/e/")
+
+            html = self.fetch(fetch_url, headers={"Referer": site_url}, referer=site_url)
             if not html:
                 print("[doodstream] 下载失败")
                 return None
+
             low = html.lower()
-            if (
-                "just a moment" in low
-                or "cf-browser-verification" in low
-                or "turnstile" in low
-                or "challenge-platform" in low
-                or "checking your browser" in low
-                or ("captcha" in low and "pass_md5" not in low)
-            ):
-                print("[doodstream] Cloudflare/验证码拦截，无法自动解析，改嗅探")
-                return None
+            cf_signs = ["just a moment", "cf-browser-verification", "turnstile",
+                        "challenge-platform", "checking your browser", "cf_chl_"]
+            is_cf = any(s in low for s in cf_signs)
+            if is_cf and "pass_md5" not in low:
+                print("[doodstream] Cloudflare 拦截，换UA重试...")
+                alt_headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                    "Referer": site_url,
+                    "Accept-Language": "en-US,en;q=0.9",
+                }
+                html = self.fetch(fetch_url, headers=alt_headers, referer=site_url)
+                if not html:
+                    return None
+                low = html.lower()
+                if any(s in low for s in cf_signs) and "pass_md5" not in low:
+                    print("[doodstream] Cloudflare 仍然拦截")
+                    return None
+
             print("[doodstream] 下载成功 len=" + str(len(html)))
+
             token = None
-            token_match = re.search(r"token=([a-z0-9]+)", html)
-            if token_match:
-                token = token_match.group(1)
+            patterns = [
+                r"[?&]token=([a-zA-Z0-9]+)",
+                r"var\s+token\s*=\s*['\"]([a-zA-Z0-9]+)['\"]",
+                r"token\s*:\s*['\"]([a-zA-Z0-9]+)['\"]",
+                r'data-token=["\']([a-zA-Z0-9]+)["\']',
+                r"/pass_md5/[^/\s<>]+/[^/\s<>?]+\?token=([a-zA-Z0-9]+)",
+                r"pass_md5[^\n]{0,200}?token['\"\s:=]+([a-zA-Z0-9]+)",
+            ]
+            for pat in patterns:
+                m = re.search(pat, html)
+                if m:
+                    token = m.group(1)
+                    break
+
             if not token:
-                token_match = re.search(r"token\s*[:=]\s*([a-z0-9]+)", html)
-                if token_match:
-                    token = token_match.group(1)
-            if not token:
-                token_match = re.search(r'"token"\s*:\s*"([a-z0-9]+)"', html)
-                if token_match:
-                    token = token_match.group(1)
-            if token:
-                print("[doodstream] token=" + token)
-            else:
                 print("[doodstream] token未找到")
                 return None
+            print("[doodstream] token=" + token)
+
             pass_md5 = None
-            pass_match = re.search(r"/pass_md5[^\s<>]+", html)
-            if pass_match:
-                pass_md5 = pass_match.group(0)
+            m = re.search(r"['\"](/pass_md5/[^'\"]+)['\"]", html)
+            if m:
+                pass_md5 = m.group(1)
             if not pass_md5:
-                pass_match = re.search(r"/pass_md5/[^\s<>]+", html)
-                if pass_match:
-                    pass_md5 = pass_match.group(0)
-            if pass_md5:
-                print("[doodstream] pass_md5=" + pass_md5)
-            else:
+                m = re.search(r"(/pass_md5/[^\s<>'\"]+)", html)
+                if m:
+                    pass_md5 = m.group(1)
+            if not pass_md5:
+                m = re.search(r"(pass_md5/[^\s<>'\"]+)", html)
+                if m:
+                    pass_md5 = "/" + m.group(1)
+
+            if not pass_md5:
                 print("[doodstream] pass_md5未找到")
                 return None
-            domain = embed_url.split("/e/")[0] if "/e/" in embed_url else embed_url.rsplit("/", 2)[0]
+            print("[doodstream] pass_md5=" + pass_md5)
+
+            from urllib.parse import urlparse
+            parsed = urlparse(fetch_url)
+            domain = parsed.scheme + "://" + parsed.netloc
             auth_url = domain + pass_md5
-            print("[doodstream] auth_url=" + auth_url)
-            base_url = self.fetch(auth_url, headers={"Referer": embed_url}, referer=embed_url)
-            if not base_url:
-                print("[doodstream] auth请求失败")
+
+            auth_headers = {
+                "User-Agent": self.headers.get("User-Agent", "Mozilla/5.0"),
+                "Referer": fetch_url,
+                "Origin": domain,
+                "Accept": "*/*",
+                "X-Requested-With": "XMLHttpRequest",
+            }
+            try:
+                resp = self.session.get(auth_url, headers=auth_headers, timeout=20, verify=False)
+                base_url = (resp.text or "").strip()
+            except Exception as e:
+                print("[doodstream] auth请求异常: " + str(e))
                 return None
-            base_url = base_url.strip()
-            print("[doodstream] base_url=" + base_url[:80])
+
             if not base_url.startswith("http"):
                 print("[doodstream] base_url无效")
                 return None
+            print("[doodstream] base_url=" + base_url[:80])
+
             random_str = "".join(random.choice(string.ascii_letters + string.digits) for _ in range(10))
             expiry = int(time.time() * 1000)
-            final_url = base_url + random_str + "?token=" + token + "&expiry=" + str(expiry)
+            sep = "" if base_url.endswith("/") else "/"
+            final_url = base_url + sep + random_str + "?token=" + token + "&expiry=" + str(expiry)
             print("[doodstream] 最终URL=" + final_url[:80])
             return final_url
+
         except Exception as e:
             print("[doodstream] 异常: " + str(e))
             import traceback
             traceback.print_exc()
             return None
 
+    # ═══════════════════════════════════════════════════
+    # 【新增 · dsvplay/streamwish 专用解析】
+    # ═══════════════════════════════════════════════════
+    def _parse_dsvplay(self, embed_url):
+        """
+        dsvplay.com / streamwish.com / filelions.com 系列
+        页面结构：嵌入页 HTML 里有 packer 混淆的 eval，解开后得到 m3u8/mp4
+        """
+        try:
+            print("[dsvplay] 解析: " + str(embed_url))
+            site_url = getattr(self, 'siteUrl', "https://netfapx.net")
+            html = self.fetch(embed_url, headers={"Referer": site_url}, referer=site_url)
+            if not html:
+                print("[dsvplay] 下载失败")
+                return None
+            print("[dsvplay] 下载成功 len=" + str(len(html)))
+
+            direct = re.search(r"(https?://[^\s\"'<>]+\.m3u8[^\s\"'<>]*)", html)
+            if direct:
+                print("[dsvplay] 明文命中: " + direct.group(1)[:100])
+                return direct.group(1)
+            direct = re.search(r"(https?://[^\s\"'<>]+\.mp4[^\s\"'<>]*)", html)
+            if direct:
+                return direct.group(1)
+
+            m = re.search(r'(?:file|sources)\s*[:=]\s*["\'](https?://[^"\']+\.(?:m3u8|mp4)[^"\']*)["\']', html)
+            if m:
+                print("[dsvplay] 变量命中: " + m.group(1)[:100])
+                return m.group(1)
+
+            decoded = self._unpack_packer(html)
+            if decoded:
+                m3u8 = re.search(r'["\'](https?://[^"\']+\.m3u8[^"\']*)["\']', decoded)
+                if m3u8:
+                    print("[dsvplay] packer解码命中m3u8: " + m3u8.group(1)[:100])
+                    return m3u8.group(1)
+                mp4 = re.search(r'["\'](https?://[^"\']+\.mp4[^"\']*)["\']', decoded)
+                if mp4:
+                    print("[dsvplay] packer解码命中mp4: " + mp4.group(1)[:100])
+                    return mp4.group(1)
+                rel = re.search(r'["\'](/[^\s"\']+\.m3u8[^"\']*)["\']', decoded)
+                if rel:
+                    from urllib.parse import urlparse
+                    p = urlparse(embed_url)
+                    abs_url = p.scheme + "://" + p.netloc + rel.group(1)
+                    print("[dsvplay] 相对路径拼接: " + abs_url[:100])
+                    return abs_url
+
+            soup = BeautifulSoup(html, "html.parser")
+            for attr in ["data-url", "data-src", "data-file", "data-video", "data-source", "data-link"]:
+                el = soup.select_one(f"[{attr}]")
+                if el:
+                    src = el.get(attr, "")
+                    if src and (".m3u8" in src or ".mp4" in src):
+                        if src.startswith("/"):
+                            from urllib.parse import urlparse
+                            p = urlparse(embed_url)
+                            src = p.scheme + "://" + p.netloc + src
+                        if src.startswith("http"):
+                            return src
+
+            iframe = soup.select_one("iframe")
+            if iframe:
+                src = iframe.get("src", "")
+                if src:
+                    if src.startswith("//"):
+                        src = "https:" + src
+                    elif src.startswith("/"):
+                        from urllib.parse import urlparse
+                        p = urlparse(embed_url)
+                        src = p.scheme + "://" + p.netloc + src
+                    if "dsvplay" in src or "streamwish" in src or "filelions" in src:
+                        print("[dsvplay] 嵌套iframe，递归解析: " + src[:80])
+                        return self._parse_dsvplay(src)
+
+            print("[dsvplay] 所有方法均失败")
+            return None
+        except Exception as e:
+            print("[dsvplay] 异常: " + str(e))
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _unpack_packer(self, html):
+        """
+        Dean Edwards Packer 解码器
+        返回解码后的 JS 字符串，失败返回 None
+        """
+        try:
+            eval_match = re.search(
+                r"}\('((?:\\'|[^'])*)',(\d+),(\d+),'((?:\\'|[^'])*)'\.split\('\|'\)\)\)",
+                html, re.DOTALL
+            )
+            if not eval_match:
+                eval_match = re.search(
+                    r"eval\(function\(p,a,c,k,e,d\)\{while\(c--\)if\(k\[c\]\)p=p\.replace\(new RegExp\('\\b'\+c\.toString\(a\)\+'\\b'\,'g'\),k\[c\]\);return p\}\('(.+?)',(\d+),(\d+),'(.+?)'\.split\('\|'\)\)\)",
+                    html, re.DOTALL
+                )
+            if not eval_match:
+                eval_match = re.search(
+                    r"\}\('((?:\\'|[^'])*)',\s*(\d+),\s*(\d+),\s*'((?:\\'|[^'])*)'\.split\('\|'\)",
+                    html, re.DOTALL
+                )
+            if not eval_match:
+                return None
+
+            p = eval_match.group(1).replace("\\'", "'").replace('\\"', '"').replace("\\/", "/")
+            a = int(eval_match.group(2))
+            c = int(eval_match.group(3))
+            k = eval_match.group(4).split("|")
+            print("[packer] 参数 a=%s c=%s k=%s" % (a, c, len(k)))
+            digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+            def int_to_base(n, base):
+                if n == 0:
+                    return "0"
+                result = ""
+                while n > 0:
+                    result = digits[n % base] + result
+                    n //= base
+                return result
+
+            decoded = p
+            for i in range(c - 1, -1, -1):
+                if i < len(k) and k[i]:
+                    decoded = re.sub(r"\b" + re.escape(int_to_base(i, a)) + r"\b", k[i], decoded)
+            print("[packer] 解码完成 len=" + str(len(decoded)))
+            return decoded
+        except Exception as e:
+            print("[packer] 解码异常: " + str(e))
+            return None
+
+    def _dsvplay_play_header(self, embed_url="https://dsvplay.com"):
+        """dsvplay/streamwish 系的播放头：Referer 必须是嵌入页域名"""
+        ua = self.headers.get(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        )
+        host = "https://dsvplay.com"
+        try:
+            from urllib.parse import urlparse
+            u = str(embed_url)
+            if u.startswith("http"):
+                p = urlparse(u)
+                if p.netloc:
+                    host = p.scheme + "://" + p.netloc
+        except Exception:
+            pass
+        # ★ 返回 JSON 字符串（TVBox T4 接口兼容性最好）
+        return json.dumps({
+            "User-Agent": ua,
+            "Referer": host + "/",
+            "Origin": host,
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+        })
 
     def _parse_generic_embed(self, embed_url):
         try:
@@ -926,6 +1133,29 @@ class ZheTian_Master(YuanTianShu):
             print("[proxy] build url fail: " + str(e))
             return url
 
+    def _proxy_media_url(self, url):
+        """
+        ★ 核心修复：把 m3u8/mp4 直链包装成 localProxy 地址
+        TVBox 播放时会调用 localProxy，由 Python 带 Referer 拉流
+        """
+        try:
+            base = None
+            if hasattr(self, "getProxyUrl"):
+                try:
+                    base = self.getProxyUrl()
+                except Exception:
+                    base = None
+            if not base or not str(base).startswith("http"):
+                print("[proxy] getProxyUrl 不可用，返回直链")
+                return url
+            from urllib.parse import quote
+            proxied = str(base) + "&url=" + quote(url, safe="")
+            print("[proxy] 媒体走代理: " + proxied[:120])
+            return proxied
+        except Exception as e:
+            print("[proxy] build media url fail: " + str(e))
+            return url
+
 
     def _fmt_header(self, hdr):
         """同时兼容 dict 与 JSON 字符串两种播放头格式"""
@@ -954,12 +1184,12 @@ class ZheTian_Master(YuanTianShu):
                     host = p.scheme + "://" + p.netloc
         except Exception:
             pass
-        return {
+        return json.dumps({
             "User-Agent": ua,
             "Referer": host + "/",
             "Origin": host,
             "Accept": "*/*",
-        }
+        })
 
     def _resolve_media_m3u8(self, master_url, header=None):
         """master.m3u8 -> 最高清晰度 media playlist（同会话立刻拉）"""
@@ -976,7 +1206,13 @@ class ZheTian_Master(YuanTianShu):
                 "Origin": "https://lulust.com",
             }
             if header:
-                h.update(header)
+                try:
+                    if isinstance(header, str):
+                        h.update(json.loads(header))
+                    else:
+                        h.update(header)
+                except Exception:
+                    pass
             try:
                 resp = self.session.get(master_url, headers=h, timeout=15, verify=False)
                 body = resp.text or ""
@@ -1022,23 +1258,24 @@ class ZheTian_Master(YuanTianShu):
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             )
             if not id:
-                return {"parse": 0, "url": "", "header": {"User-Agent": ua}, "jx": 0}
+                return {"parse": 0, "url": "", "header": json.dumps({"User-Agent": ua}), "jx": 0}
 
             sid = str(id)
             # 已是直链（二次回调或上游已解）
             if ".m3u8" in sid or "tnmr.org" in sid or sid.endswith(".mp4"):
-                print("[playerContent] 已是直链，立即返回+header（不二次请求避免 token 失效）")
-                hdr = {
-                    "User-Agent": ua,
-                    "Referer": "https://lulust.com/",
-                    "Origin": "https://lulust.com",
-                    "Accept": "*/*",
-                    "Accept-Language": "en-US,en;q=0.9",
-                }
-                # 也带 luluvdo 备用
+                print("[playerContent] 已是直链，走 localProxy 代理播放")
+                low_sid = sid.lower()
+                if "tnmr.org" in low_sid or "dsvplay" in low_sid or "streamwish" in low_sid or "filelions" in low_sid:
+                    hdr = self._dsvplay_play_header("https://dsvplay.com")
+                    print("[playerContent] dsvplay 系 -> 代理+dsvplay header")
+                else:
+                    hdr = self._lulu_play_header("https://lulust.com")
+                    print("[playerContent] luluvdo 系 -> 代理+lulu header")
+                # ★ 关键：直链走 localProxy，由 Python 带 Referer 拉流
+                proxied_url = self._proxy_media_url(sid)
                 return {
                     "parse": 0,
-                    "url": sid,
+                    "url": proxied_url,
                     "header": hdr,
                     "jx": 0,
                 }
@@ -1047,7 +1284,7 @@ class ZheTian_Master(YuanTianShu):
                 return {
                     "parse": 1,
                     "url": sid.replace("actor::", ""),
-                    "header": {"User-Agent": ua, "Referer": str(self.siteUrl)},
+                    "header": json.dumps({"User-Agent": ua, "Referer": str(self.siteUrl)}),
                     "jx": 0,
                 }
 
@@ -1099,33 +1336,54 @@ class ZheTian_Master(YuanTianShu):
                 real_url = self._parse_embed_page(sid)
                 print("[兵字秘] real_url=" + (str(real_url)[:100] if real_url else "None"))
                 is_lulu = any(d in sid.lower() for d in luluvdo_domains) or ("lulu" in sid.lower())
-                if real_url and (is_lulu or ".m3u8" in str(real_url) or ".mp4" in str(real_url)):
-                    hdr = self._lulu_play_header(sid)
+                is_dsv = any(d in sid.lower() for d in ["dsvplay", "streamwish", "filelions", "lvturbo", "wishfast"])
+                if real_url and (is_lulu or is_dsv or ".m3u8" in str(real_url) or ".mp4" in str(real_url)):
+                    if is_dsv:
+                        hdr = self._dsvplay_play_header(sid)
+                    else:
+                        hdr = self._lulu_play_header(sid)
                     play = str(real_url)
                     if "master.m3u8" in play:
                         play = self._resolve_media_m3u8(play, hdr)
-                    print("[兵字秘] luluvdo成功 parse=0 play=" + play[:100])
+                    # ★ 关键：解析出的直链也走 localProxy
+                    play = self._proxy_media_url(play)
+                    print("[兵字秘] 预解析成功 parse=0 play=" + play[:100])
                     return {"parse": 0, "url": play, "header": hdr, "jx": 0}
                 if real_url and (self.isVideoFormat(real_url) or ".m3u8" in real_url or ".mp4" in real_url):
                     print("[兵字秘] 预解析成功 parse=0")
                     return {
                         "parse": 0,
                         "url": real_url,
-                        "header": {"User-Agent": ua, "Referer": str(self.siteUrl)},
+                        "header": json.dumps({"User-Agent": ua, "Referer": str(self.siteUrl)}),
+                        "jx": 0,
+                    }
+                # DoodStream 解析失败：返回嵌入页+header，让播放器直接加载
+                is_dood = any(d in sid.lower() for d in doodstream_domains)
+                if is_dood:
+                    print("[兵字秘] DoodStream 解析失败，返回嵌入页 parse=0")
+                    return {
+                        "parse": 0,
+                        "url": sid,
+                        "header": json.dumps({
+                            "User-Agent": ua,
+                            "Referer": str(self.siteUrl),
+                            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                            "Accept-Language": "en-US,en;q=0.9",
+                        }),
                         "jx": 0,
                     }
                 print("[兵字秘] 预解析失败，改嗅探 parse=1 jx=0")
                 return {
                     "parse": 1,
                     "url": sid,
-                    "header": {"User-Agent": ua, "Referer": str(self.siteUrl)},
+                    "header": json.dumps({"User-Agent": ua, "Referer": str(self.siteUrl)}),
                     "jx": 0,
                 }
             print("[playerContent] 非嵌入 parse=0")
             return {
                 "parse": 0,
                 "url": sid,
-                "header": {"User-Agent": ua, "Referer": str(self.siteUrl)},
+                "header": json.dumps({"User-Agent": ua, "Referer": str(self.siteUrl)}),
                 "jx": 0,
             }
         except Exception as e:
@@ -1135,10 +1393,10 @@ class ZheTian_Master(YuanTianShu):
             return {
                 "parse": 1,
                 "url": id,
-                "header": {
+                "header": json.dumps({
                     "User-Agent": "Mozilla/5.0",
                     "Referer": str(getattr(self, "siteUrl", "https://netfapx.net")),
-                },
+                }),
                 "jx": 0,
             }
 
@@ -1155,7 +1413,7 @@ class ZheTian_Master(YuanTianShu):
         return self.searchContent(key, quick, pg)
 
     def localProxy(self, param):
-        """代理 m3u8：带 Referer 拉取，并把相对地址改成绝对地址"""
+        """代理 m3u8/ts：带 Referer 拉取，重写 m3u8 内相对路径为代理地址"""
         try:
             url = param.get("url") or param.get("path") or ""
             if not url:
@@ -1166,26 +1424,46 @@ class ZheTian_Master(YuanTianShu):
                     if isinstance(v, str) and v.startswith("http"):
                         url = v
                         break
-            hdr = self._lulu_play_header("https://lulust.com")
+
+            # 根据目标域名选择 header
+            low_url = str(url).lower()
+            if "tnmr.org" in low_url or "dsvplay" in low_url or "streamwish" in low_url or "filelions" in low_url:
+                hdr = json.loads(self._dsvplay_play_header("https://dsvplay.com"))
+                print("[proxy] dsvplay header")
+            elif "lulu" in low_url or "lulust" in low_url or "luluvdo" in low_url:
+                hdr = json.loads(self._lulu_play_header("https://lulust.com"))
+                print("[proxy] lulu header")
+            else:
+                hdr = json.loads(self._lulu_play_header("https://lulust.com"))
+
             print("[proxy] fetch " + str(url)[:100])
             resp = self.session.get(url, headers=hdr, timeout=20, verify=False, allow_redirects=True)
             content = resp.content or b""
             ctype = resp.headers.get("Content-Type") or "application/vnd.apple.mpegurl"
-            # 重写 m3u8 内相对路径
+
+            # m3u8 内容：重写相对路径为代理地址（让 TVBox 继续走 localProxy 拉分片）
             if b"#EXTM3U" in content[:20] or "mpegurl" in ctype or ".m3u8" in url:
                 try:
                     text_body = content.decode("utf-8", "ignore")
                     lines = []
                     for line in text_body.splitlines():
                         s = line.strip()
-                        if s and not s.startswith("#") and not s.startswith("http"):
-                            lines.append(parse.urljoin(url, s))
+                        if s and not s.startswith("#"):
+                            if not s.startswith("http"):
+                                # 相对路径 -> 绝对路径
+                                abs_url = parse.urljoin(url, s)
+                            else:
+                                abs_url = s
+                            # ★ 分片也走代理（带 Referer）
+                            proxied = self._proxy_media_url(abs_url)
+                            lines.append(proxied)
                         else:
                             lines.append(line)
                     content = "\n".join(lines).encode("utf-8")
                     ctype = "application/vnd.apple.mpegurl"
                 except Exception as e:
                     print("[proxy] rewrite fail: " + str(e))
+
             print("[proxy] ok len=" + str(len(content)) + " ctype=" + str(ctype))
             return [200, ctype, hdr, content]
         except Exception as e:
