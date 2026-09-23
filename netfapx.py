@@ -42,40 +42,59 @@ class YuanTianShu(Spider):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": "gzip, deflate",
         "DNT": "1",
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
     }
 
-    def fetch(self, url, headers=None, timeout=15, referer=None):
+    def fetch(self, url, headers=None, timeout=20, referer=None):
         h = {**self.headers, **(headers or {})}
         if referer:
             h["Referer"] = referer
+        # 跟随跳转：luluvid.com -> luluvdo.com
         for i in range(3):
             try:
-                resp = self.session.get(url, headers=h, timeout=timeout, allow_redirects=True)
-                resp.raise_for_status()
-                resp.encoding = "utf-8"
-                return resp.text
+                resp = self.session.get(
+                    url, headers=h, timeout=timeout,
+                    allow_redirects=True, verify=False,
+                )
+                # 不强制 raise，部分环境证书异常但仍有正文
+                if resp is None:
+                    continue
+                text = resp.text or ""
+                if not text and hasattr(resp, "content"):
+                    try:
+                        text = resp.content.decode("utf-8", "ignore")
+                    except Exception:
+                        text = ""
+                if text:
+                    return text
+                print(f"[源天书] 空响应 code={getattr(resp,'status_code', '?')} url={url}")
             except Exception as e:
+                print(f"[源天书] 请求异常({i}): {url} | {e}")
                 if i == 2:
-                    print(f"[源天书] 定龙脉失败: {url} | {e}")
                     return ""
-                time.sleep(2 ** i)
+                time.sleep(1 + i)
+        return ""
 
 
 class ZheTian_Master(YuanTianShu):
     # 类级别配置（TVBox 环境兼容性）
     siteUrl = "https://netfapx.net"
     proxyPort = 9979
-    luluvdo_domains = ["luluvdo.com", "lulustream.com", "lulucdn.com", "luluvid.com", "lulustream.net", "luluvid.net", "lulucdn.net"]
+    luluvdo_domains = [
+        "luluvdo.com", "lulustream.com", "lulust.com", "lulucdn.com",
+        "luluvid.com", "lulustream.net", "luluvid.net", "lulucdn.net",
+        "luluvid.org", "lulustream.org",
+    ]
     doodstream_domains = [
         "dood.to", "dood.so", "dood.watch", "dood.ws", "dood.sh",
         "dood.cx", "dood.la", "dood.pm", "dood.re", "dood.wf",
         "dood.yt", "dooood.com", "doods.pro", "ds2play.com",
         "doodstream.com", "playmogo.com", "doodcdn.com",
-        "doply.net",
+        "doply.net", "do7go.com", "dooodster.com", "vide0.net", "video.net", "d0000d.com",
+        "d000d.com", "dood.li", "dood.work", "doods.yt",
     ]
     embed_domains = [
         "dsvplay", "streamtape", "mixdrop", "voe", "filemoon",
@@ -126,7 +145,11 @@ class ZheTian_Master(YuanTianShu):
         ]
 
         # luluvdo / lulustream
-        self.luluvdo_domains = ["luluvdo.com", "lulustream.com", "lulucdn.com", "luluvid.com", "lulustream.net", "luluvid.net", "lulucdn.net"]
+        self.luluvdo_domains = [
+            "luluvdo.com", "lulustream.com", "lulust.com", "lulucdn.com",
+            "luluvid.com", "lulustream.net", "luluvid.net", "lulucdn.net",
+            "luluvid.org", "lulustream.org",
+        ]
 
         # DoodStream 及其镜像
         self.doodstream_domains = [
@@ -134,6 +157,8 @@ class ZheTian_Master(YuanTianShu):
             "dood.cx", "dood.la", "dood.pm", "dood.re", "dood.wf",
             "dood.yt", "dooood.com", "doods.pro", "ds2play.com",
             "doodstream.com", "playmogo.com", "doodcdn.com",
+            "doply.net", "do7go.com", "dooodster.com", "vide0.net", "d0000d.com",
+            "d000d.com", "dood.li", "dood.work", "doods.yt",
         ]
 
         # 其他嵌入播放器
@@ -630,17 +655,26 @@ class ZheTian_Master(YuanTianShu):
     def _parse_embed_page(self, embed_url):
         try:
             print("[兵字秘] 预解析: " + str(embed_url)[:80])
-            luluvdo_domains = getattr(self, 'luluvdo_domains', ["luluvdo.com", "lulustream.com", "lulucdn.com", "luluvid.com", "lulustream.net", "luluvid.net", "lulucdn.net"])
-            is_luluvdo = any(d in embed_url.lower() for d in luluvdo_domains)
+            low = str(embed_url).lower()
+            luluvdo_domains = getattr(self, 'luluvdo_domains', [
+                "luluvdo.com", "lulustream.com", "lulust.com", "lulucdn.com",
+                "luluvid.com", "lulustream.net", "luluvid.net", "lulucdn.net",
+            ])
+            is_luluvdo = any(d in low for d in luluvdo_domains) or ("lulu" in low)
             if is_luluvdo:
-                print("[兵字秘] 检测到 luluvdo")
+                print("[兵字秘] 检测到 luluvdo/lulust")
                 return self._parse_luluvdo(embed_url)
             doodstream_domains = getattr(self, 'doodstream_domains', ["dood.to", "dood.so", "dood.watch", "playmogo.com", "doply.net"])
             is_dood = any(d in embed_url.lower() for d in doodstream_domains)
             if is_dood:
                 print("[兵字秘] 检测到 DoodStream")
                 return self._parse_doodstream(embed_url)
-            return self._parse_generic_embed(embed_url)
+            # 未知域名但有 packer，按 lulu 解
+            print("[兵字秘] 未知嵌入，先试通用再试 packer")
+            generic = self._parse_generic_embed(embed_url)
+            if generic:
+                return generic
+            return self._parse_luluvdo(embed_url)
         except Exception as e:
             print("[兵字秘] 预解析异常: " + str(e))
             return None
@@ -650,54 +684,68 @@ class ZheTian_Master(YuanTianShu):
         try:
             print("[luluvdo] 解析: " + str(embed_url))
             site_url = getattr(self, 'siteUrl', "https://netfapx.net")
-            html = self.fetch(embed_url, headers={"Referer": site_url}, referer=site_url)
+            fetch_url = str(embed_url).replace("luluvid.com", "luluvdo.com")
+            html = self.fetch(fetch_url, headers={"Referer": site_url}, referer=site_url)
+            if not html:
+                print("[luluvdo] 主域名失败，试原链")
+                html = self.fetch(embed_url, headers={"Referer": site_url}, referer=site_url)
             if not html:
                 print("[luluvdo] 下载失败")
                 return None
             print("[luluvdo] 下载成功 len=" + str(len(html)))
+
+            direct = re.search(r"(https?://[^\s\"'<>]+\.m3u8[^\s\"'<>]*)", html)
+            if direct:
+                print("[luluvdo] 明文命中: " + direct.group(1)[:100])
+                return direct.group(1)
+
+            # 宽松 packer：匹配 }\('p',a,c,'k'.split('|'))
             eval_match = re.search(
-                r"eval\(function\(p,a,c,k,e,d\)\{while\(c--\)if\(k\[c\]\)p=p\.replace\(new RegExp\('\\b'\+c\.toString\(a\)\+'\\b'\,'g'\),k\[c\]\);return p\}\('(.+?)',(\d+),(\d+),'(.+?)'\.split\('\|'\)\)\)",
+                r"}\('((?:\\'|[^'])*)',(\d+),(\d+),'((?:\\'|[^'])*)'\.split\('\|'\)\)\)",
                 html, re.DOTALL
             )
             if not eval_match:
-                print("[luluvdo] 完整正则失败，尝试直接搜索m3u8")
-                direct = re.search(r"(https?://[^\s<>]+\.m3u8[^\s<>]*)", html)
-                if direct:
-                    print("[luluvdo] 直接命中: " + direct.group(1)[:80])
-                    return direct.group(1)
-                return None
-            p = eval_match.group(1)
+                eval_match = re.search(
+                    r"eval\(function\(p,a,c,k,e,d\)\{while\(c--\)if\(k\[c\]\)p=p\.replace\(new RegExp\('\\b'\+c\.toString\(a\)\+'\\b'\,'g'\),k\[c\]\);return p\}\('(.+?)',(\d+),(\d+),'(.+?)'\.split\('\|'\)\)\)",
+                    html, re.DOTALL
+                )
+            if not eval_match:
+                print("[luluvdo] packer失败")
+                m = re.search(r"file\s*:\s*[\"'](https?://[^\"']+)[\"']", html)
+                return m.group(1) if m else None
+
+            p = eval_match.group(1).replace("\\'", "'").replace('\\"', '"')
             a = int(eval_match.group(2))
             c = int(eval_match.group(3))
             k = eval_match.group(4).split("|")
-            print("[luluvdo] 参数 a=" + str(a) + " c=" + str(c) + " k=" + str(len(k)))
+            print("[luluvdo] 参数 a=%s c=%s k=%s" % (a, c, len(k)))
+            digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+
             def int_to_base(n, base):
-                digits = "0123456789abcdefghijklmnopqrstuvwxyz"
-                if n == 0: return "0"
+                if n == 0:
+                    return "0"
                 result = ""
                 while n > 0:
                     result = digits[n % base] + result
                     n //= base
                 return result
+
             decoded = p
-            while c > 0:
-                c -= 1
-                if c < len(k) and k[c]:
-                    pattern = r"\b" + int_to_base(c, a) + r"\b"
-                    val = k[c]
-                    decoded = re.sub(pattern, lambda m, v=val: v.replace("\\", "\\\\").replace("$", "\\$"), decoded)
+            for i in range(c - 1, -1, -1):
+                if i < len(k) and k[i]:
+                    decoded = re.sub(r"\b" + re.escape(int_to_base(i, a)) + r"\b", k[i], decoded)
+
             print("[luluvdo] 解码完成 len=" + str(len(decoded)))
-            m3u8 = re.search(r"file:\s*[^\w](https?://[^\s<>]+\.m3u8[^\s<>]*)[^\w]", decoded)
+            m3u8 = re.search(r'file\s*:\s*["\'](https?://[^"\']+\.m3u8[^"\']*)["\']', decoded)
             if m3u8:
-                print("[luluvdo] 命中m3u8: " + m3u8.group(1)[:80])
+                print("[luluvdo] 命中m3u8: " + m3u8.group(1)[:100])
                 return m3u8.group(1)
-            m3u8 = re.search(r"(https?://[^\s<>]+\.m3u8[^\s<>]*)", decoded)
+            m3u8 = re.search(r"(https?://[^\s\"'<>]+\.m3u8[^\s\"'<>]*)", decoded)
             if m3u8:
-                print("[luluvdo] 回退命中m3u8: " + m3u8.group(1)[:80])
+                print("[luluvdo] 回退命中: " + m3u8.group(1)[:100])
                 return m3u8.group(1)
-            mp4 = re.search(r"(https?://[^\s<>]+\.mp4[^\s<>]*)", decoded)
+            mp4 = re.search(r"(https?://[^\s\"'<>]+\.mp4[^\s\"'<>]*)", decoded)
             if mp4:
-                print("[luluvdo] 命中mp4: " + mp4.group(1)[:80])
                 return mp4.group(1)
             print("[luluvdo] 未找到视频链接")
             return None
@@ -716,8 +764,16 @@ class ZheTian_Master(YuanTianShu):
             if not html:
                 print("[doodstream] 下载失败")
                 return None
-            if "turnstile" in html.lower() or "captcha" in html.lower() or "cf-browser-verification" in html.lower():
-                print("[doodstream] 页面有验证码，无法自动解析")
+            low = html.lower()
+            if (
+                "just a moment" in low
+                or "cf-browser-verification" in low
+                or "turnstile" in low
+                or "challenge-platform" in low
+                or "checking your browser" in low
+                or ("captcha" in low and "pass_md5" not in low)
+            ):
+                print("[doodstream] Cloudflare/验证码拦截，无法自动解析，改嗅探")
                 return None
             print("[doodstream] 下载成功 len=" + str(len(html)))
             token = None
@@ -851,39 +907,240 @@ class ZheTian_Master(YuanTianShu):
             print(f"[兵字秘] 通用解析异常: {e}")
             return None
 
+    def _proxy_play_url(self, url):
+        """有 getProxyUrl 时走本地代理（保证带 Referer），否则直链"""
+        try:
+            base = None
+            if hasattr(self, "getProxyUrl"):
+                try:
+                    base = self.getProxyUrl()
+                except Exception:
+                    base = None
+            if not base or not str(base).startswith("http"):
+                return url
+            from urllib.parse import quote
+            proxied = str(base) + "&url=" + quote(url, safe="")
+            print("[proxy] use " + proxied[:120])
+            return proxied
+        except Exception as e:
+            print("[proxy] build url fail: " + str(e))
+            return url
+
+
+    def _fmt_header(self, hdr):
+        """同时兼容 dict 与 JSON 字符串两种播放头格式"""
+        if not hdr:
+            return {}
+        if isinstance(hdr, str):
+            return hdr
+        # 多数 FongMi/T4 支持 dict；部分只要 JSON 字符串
+        try:
+            return hdr  # 优先 dict
+        except Exception:
+            return json.dumps(hdr, ensure_ascii=False)
+
+    def _lulu_play_header(self, embed_or_host="https://lulust.com"):
+        ua = self.headers.get(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        )
+        host = "https://lulust.com"
+        try:
+            from urllib.parse import urlparse
+            u = str(embed_or_host)
+            if u.startswith("http"):
+                p = urlparse(u)
+                if p.netloc:
+                    host = p.scheme + "://" + p.netloc
+        except Exception:
+            pass
+        return {
+            "User-Agent": ua,
+            "Referer": host + "/",
+            "Origin": host,
+            "Accept": "*/*",
+        }
+
+    def _resolve_media_m3u8(self, master_url, header=None):
+        """master.m3u8 -> 最高清晰度 media playlist（同会话立刻拉）"""
+        try:
+            if not master_url or ".m3u8" not in master_url:
+                return master_url
+            # 已经是 media 列表则不再解析
+            if "index-" in master_url and "master.m3u8" not in master_url:
+                return master_url
+            h = {
+                "User-Agent": self.headers.get("User-Agent", "Mozilla/5.0"),
+                "Accept": "*/*",
+                "Referer": "https://lulust.com/",
+                "Origin": "https://lulust.com",
+            }
+            if header:
+                h.update(header)
+            try:
+                resp = self.session.get(master_url, headers=h, timeout=15, verify=False)
+                body = resp.text or ""
+            except Exception as e:
+                print("[luluvdo] master fetch fail: " + str(e))
+                return master_url
+            if "#EXTM3U" not in body:
+                print("[luluvdo] master 非 m3u8 code=%s len=%s" % (getattr(resp, "status_code", "?"), len(body)))
+                return master_url
+            # media playlist 特征
+            if "#EXT-X-STREAM-INF" not in body:
+                return master_url
+            best_bw, best_url = -1, None
+            lines = body.strip().splitlines()
+            i = 0
+            while i < len(lines):
+                line = lines[i].strip()
+                if line.startswith("#EXT-X-STREAM-INF"):
+                    bw = 0
+                    m = re.search(r"BANDWIDTH=(\d+)", line)
+                    if m:
+                        bw = int(m.group(1))
+                    if i + 1 < len(lines):
+                        u = lines[i + 1].strip()
+                        if u and not u.startswith("#"):
+                            abs_u = u if u.startswith("http") else parse.urljoin(master_url, u)
+                            if bw >= best_bw:
+                                best_bw, best_url = bw, abs_u
+                i += 1
+            if best_url:
+                print("[luluvdo] media playlist: " + best_url[:120])
+                return best_url
+            return master_url
+        except Exception as e:
+            print("[luluvdo] resolve media 失败: " + str(e))
+            return master_url
+
     def playerContent(self, flag, id, vipFlags):
         try:
-            print("[playerContent] flag=" + str(flag) + " id=" + str(id)[:80])
+            print("[playerContent] flag=" + str(flag) + " id=" + str(id)[:100])
+            ua = self.headers.get(
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            )
             if not id:
-                return {"parse": 1, "url": "", "header": "", "jx": 0}
-            if str(id).startswith("actor::"):
-                return {"parse": 1, "url": str(id).replace("actor::", ""), "header": "Referer=" + str(self.siteUrl), "jx": 0}
+                return {"parse": 0, "url": "", "header": {"User-Agent": ua}, "jx": 0}
+
+            sid = str(id)
+            # 已是直链（二次回调或上游已解）
+            if ".m3u8" in sid or "tnmr.org" in sid or sid.endswith(".mp4"):
+                print("[playerContent] 已是直链，立即返回+header（不二次请求避免 token 失效）")
+                hdr = {
+                    "User-Agent": ua,
+                    "Referer": "https://lulust.com/",
+                    "Origin": "https://lulust.com",
+                    "Accept": "*/*",
+                    "Accept-Language": "en-US,en;q=0.9",
+                }
+                # 也带 luluvdo 备用
+                return {
+                    "parse": 0,
+                    "url": sid,
+                    "header": hdr,
+                    "jx": 0,
+                }
+
+            if sid.startswith("actor::"):
+                return {
+                    "parse": 1,
+                    "url": sid.replace("actor::", ""),
+                    "header": {"User-Agent": ua, "Referer": str(self.siteUrl)},
+                    "jx": 0,
+                }
+
+            # 作品列表 / 详情页给的是 netfapx watch 地址，需先抓页取 iframe
+            if "netfapx.net" in sid and "/watch/" in sid:
+                print("[playerContent] netfapx 详情页，提取嵌入")
+                try:
+                    html = self.fetch(sid, referer=str(self.siteUrl))
+                    embed = None
+                    if html:
+                        for m in re.finditer(r'<iframe[^>]+src=["\']([^"\']+)["\']', html, re.I):
+                            src = m.group(1).strip()
+                            if src.startswith("//"):
+                                src = "https:" + src
+                            low = src.lower()
+                            if any(x in low for x in ("lulu", "dood", "do7go", "playmogo", "vide0", "stream", "/e/", "embed")):
+                                if "tsyndicate" in low or "ads" in low:
+                                    continue
+                                embed = src
+                                break
+                        if not embed:
+                            m = re.search(r'https?://(?:www\.)?(?:lulu[^\s"\'<>]+|dood[^\s"\'<>]+|do7go\.com[^\s"\'<>]*)', html, re.I)
+                            if m:
+                                embed = m.group(0)
+                    if embed:
+                        print("[playerContent] 详情页嵌入: " + embed[:100])
+                        # 递归走嵌入解析
+                        return self.playerContent(flag, embed, vipFlags)
+                    print("[playerContent] 详情页未找到嵌入")
+                except Exception as e:
+                    print("[playerContent] 详情页解析异常: " + str(e))
+
             embed_signs = ["/e/", "/embed/", "/player/", "/stream/", "/v/"]
-            luluvdo_domains = getattr(self, 'luluvdo_domains', ["luluvdo.com", "lulustream.com", "lulucdn.com", "luluvid.com", "lulustream.net", "luluvid.net", "lulucdn.net"])
-            doodstream_domains = getattr(self, 'doodstream_domains', ["dood.to", "dood.so", "dood.watch", "doply.net"])
-            embed_domains = getattr(self, 'embed_domains', ["streamtape", "mixdrop"])
+            luluvdo_domains = getattr(self, "luluvdo_domains", [
+                "luluvdo.com", "lulustream.com", "lulust.com", "lulucdn.com",
+                "luluvid.com", "lulustream.net", "luluvid.net", "lulucdn.net",
+            ])
+            doodstream_domains = getattr(self, "doodstream_domains", [
+                "dood.to", "dood.so", "dood.watch", "doply.net", "do7go.com",
+            ])
+            embed_domains = getattr(self, "embed_domains", ["streamtape", "mixdrop"])
             all_embed_domains = embed_domains + doodstream_domains + luluvdo_domains
-            is_embed = any(s in str(id) for s in embed_signs) or any(d in str(id).lower() for d in all_embed_domains)
+            is_embed = any(s in sid for s in embed_signs) or any(
+                d in sid.lower() for d in all_embed_domains
+            )
             print("[playerContent] is_embed=" + str(is_embed))
             if is_embed:
-                print("[兵字秘] 嵌入页: " + str(id)[:60])
-                real_url = self._parse_embed_page(str(id))
-                print("[兵字秘] real_url=" + str(real_url is not None))
-                if real_url and any(d in str(id).lower() for d in luluvdo_domains):
-                    print("[兵字秘] luluvdo成功 parse=0")
-                    return {"parse": 0, "url": real_url, "header": "Referer=https://luluvdo.com", "jx": 0}
-                if real_url and self.isVideoFormat(real_url):
+                print("[兵字秘] 嵌入页: " + sid[:80])
+                real_url = self._parse_embed_page(sid)
+                print("[兵字秘] real_url=" + (str(real_url)[:100] if real_url else "None"))
+                is_lulu = any(d in sid.lower() for d in luluvdo_domains) or ("lulu" in sid.lower())
+                if real_url and (is_lulu or ".m3u8" in str(real_url) or ".mp4" in str(real_url)):
+                    hdr = self._lulu_play_header(sid)
+                    play = str(real_url)
+                    if "master.m3u8" in play:
+                        play = self._resolve_media_m3u8(play, hdr)
+                    print("[兵字秘] luluvdo成功 parse=0 play=" + play[:100])
+                    return {"parse": 0, "url": play, "header": hdr, "jx": 0}
+                if real_url and (self.isVideoFormat(real_url) or ".m3u8" in real_url or ".mp4" in real_url):
                     print("[兵字秘] 预解析成功 parse=0")
-                    return {"parse": 0, "url": real_url, "header": "Referer=" + str(self.siteUrl), "jx": 0}
-                print("[兵字秘] 预解析失败 parse=1")
-                return {"parse": 1, "url": id, "header": "Referer=" + str(self.siteUrl), "jx": 1}
+                    return {
+                        "parse": 0,
+                        "url": real_url,
+                        "header": {"User-Agent": ua, "Referer": str(self.siteUrl)},
+                        "jx": 0,
+                    }
+                print("[兵字秘] 预解析失败，改嗅探 parse=1 jx=0")
+                return {
+                    "parse": 1,
+                    "url": sid,
+                    "header": {"User-Agent": ua, "Referer": str(self.siteUrl)},
+                    "jx": 0,
+                }
             print("[playerContent] 非嵌入 parse=0")
-            return {"parse": 0, "url": id, "header": "Referer=" + str(self.siteUrl), "jx": 0}
+            return {
+                "parse": 0,
+                "url": sid,
+                "header": {"User-Agent": ua, "Referer": str(self.siteUrl)},
+                "jx": 0,
+            }
         except Exception as e:
             print("[playerContent] 异常: " + str(e))
             import traceback
             traceback.print_exc()
-            return {"parse": 1, "url": id, "header": "Referer=" + str(getattr(self, 'siteUrl', 'https://netfapx.net')), "jx": 1}
+            return {
+                "parse": 1,
+                "url": id,
+                "header": {
+                    "User-Agent": "Mozilla/5.0",
+                    "Referer": str(getattr(self, "siteUrl", "https://netfapx.net")),
+                },
+                "jx": 0,
+            }
 
 
     def searchContent(self, key, quick, pg="1"):
@@ -898,7 +1155,44 @@ class ZheTian_Master(YuanTianShu):
         return self.searchContent(key, quick, pg)
 
     def localProxy(self, param):
-        return [200, "application/json", json.dumps({"proxy": f"http://127.0.0.1:{self.proxyPort}", "status": "ready"})]
+        """代理 m3u8：带 Referer 拉取，并把相对地址改成绝对地址"""
+        try:
+            url = param.get("url") or param.get("path") or ""
+            if not url:
+                return [400, "text/plain", {}, "no url"]
+            # 有的实现会把完整 query 再包一层
+            if url.startswith("http") is False and "http" in str(param):
+                for v in param.values():
+                    if isinstance(v, str) and v.startswith("http"):
+                        url = v
+                        break
+            hdr = self._lulu_play_header("https://lulust.com")
+            print("[proxy] fetch " + str(url)[:100])
+            resp = self.session.get(url, headers=hdr, timeout=20, verify=False, allow_redirects=True)
+            content = resp.content or b""
+            ctype = resp.headers.get("Content-Type") or "application/vnd.apple.mpegurl"
+            # 重写 m3u8 内相对路径
+            if b"#EXTM3U" in content[:20] or "mpegurl" in ctype or ".m3u8" in url:
+                try:
+                    text_body = content.decode("utf-8", "ignore")
+                    lines = []
+                    for line in text_body.splitlines():
+                        s = line.strip()
+                        if s and not s.startswith("#") and not s.startswith("http"):
+                            lines.append(parse.urljoin(url, s))
+                        else:
+                            lines.append(line)
+                    content = "\n".join(lines).encode("utf-8")
+                    ctype = "application/vnd.apple.mpegurl"
+                except Exception as e:
+                    print("[proxy] rewrite fail: " + str(e))
+            print("[proxy] ok len=" + str(len(content)) + " ctype=" + str(ctype))
+            return [200, ctype, hdr, content]
+        except Exception as e:
+            print("[proxy] error: " + str(e))
+            import traceback
+            traceback.print_exc()
+            return [500, "text/plain", {}, str(e).encode("utf-8")]
 
 
 class Spider(ZheTian_Master):
