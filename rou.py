@@ -67,8 +67,19 @@ class Spider(BaseSpider):
                 raw = param
                 typ = 'rou'
             else:
-                raw = param.get('url') or param.get('u') or ''
+                raw = (
+                    param.get('url')
+                    or param.get('target')
+                    or param.get('u')
+                    or param.get('path')
+                    or ''
+                )
+                # 部分壳把参数值做成 list
+                if isinstance(raw, (list, tuple)):
+                    raw = raw[0] if raw else ''
                 typ = param.get('type') or 'rou'
+                if isinstance(typ, (list, tuple)):
+                    typ = typ[0] if typ else 'rou'
             if not raw:
                 # 兼容 u= token
                 if not isinstance(param, str):
@@ -132,11 +143,16 @@ class Spider(BaseSpider):
                     if not u or u.startswith('#'):
                         return u
                     absu = urljoin(base, u)
-                    # 优先走 Worker；否则本地代理
                     if self.workerProxy:
                         return self.workerProxy.rstrip('/') + '?url=' + quote(absu, safe='')
                     token = base64.urlsafe_b64encode(absu.encode()).decode().rstrip('=')
-                    return proxy_base + '&type=media&url=' + quote(token, safe='')
+                    j = '&' if ('?' in proxy_base) else '?'
+                    return (
+                        proxy_base + j + 'type=media'
+                        + '&url=' + quote(absu, safe='')
+                        + '&target=' + quote(absu, safe='')
+                        + '&u=' + quote(token, safe='')
+                    )
 
                 lines = []
                 for line in content.splitlines():
@@ -153,34 +169,58 @@ class Spider(BaseSpider):
                     else:
                         lines.append(line)
                 content = '\n'.join(lines) + '\n'
-                action = {'url': '', 'header': '', 'param': '', 'type': 'string', 'after': ''}
-                return [200, 'application/vnd.apple.mpegurl', action, content]
+                # T4: [code, ctype, body, headers]；Pyramid: 第3项可为 action
+                return [200, 'application/vnd.apple.mpegurl', content, {
+                    'Content-Type': 'application/vnd.apple.mpegurl',
+                    'Access-Control-Allow-Origin': '*',
+                }]
 
-            # 媒体分片：返回二进制
-            action = {'url': '', 'header': '', 'param': '', 'type': 'string', 'after': ''}
-            return [200, 'application/octet-stream', action, body]
+            # 媒体分片：返回二进制（TS）
+            return [200, 'video/MP2T', body, {
+                'Content-Type': 'video/MP2T',
+                'Access-Control-Allow-Origin': '*',
+            }]
         except Exception as e:
             self._log(f'localProxy异常: {e}')
-            return [500, 'text/plain', {'type': 'string'}, str(e)]
+            return [500, 'text/plain', str(e), {}]
 
     def _proxy_base(self):
-        """本地代理前缀。
+        """本地代理前缀（优先 T4/FongMi 注入的地址）。
 
-        兼容：
-          - UndCover:  http://127.0.0.1:UndCover/proxy?do={key}&api=python
-          - 9978 壳:   http://127.0.0.1:9978/proxy?do=py
+        优先级：
+          1) self.getProxyUrl() / self.t4_api  （T4 drpy-node / 影视T4）
+          2) self.localProxyUrl + do=
+          3) 9978 / UndCover 兜底
         """
-        base = getattr(self, 'localProxyUrl', 'http://127.0.0.1:UndCover/proxy')
-        if 'do=' in base:
+        # T4: daemon 注入 t4_api，例如 http://127.0.0.1:5757/proxy/xxx/?do=py
+        for attr in ('t4_api',):
+            v = getattr(self, attr, None)
+            if v and str(v).startswith('http'):
+                return str(v).rstrip('&').rstrip('?')
+        # FongMi / 部分壳
+        try:
+            if hasattr(self, 'getProxyUrl') and callable(self.getProxyUrl):
+                u = self.getProxyUrl()
+                if u and str(u).startswith('http'):
+                    return str(u).rstrip('&').rstrip('?')
+        except Exception:
+            pass
+        base = getattr(self, 'localProxyUrl', '') or ''
+        if base and 'do=' in base:
             return base
         mode = getattr(self, 'proxyDoMode', 'key') or 'key'
+        if not base:
+            base = 'http://127.0.0.1:9978/proxy' if mode == 'py' else 'http://127.0.0.1:UndCover/proxy'
         if mode == 'py':
-            # 常见 9978 / FongMi 系
-            if ':9978' in base or base.rstrip('/').endswith('/proxy'):
-                return base.rstrip('/') + '?do=py'
-            return 'http://127.0.0.1:9978/proxy?do=py'
+            sep = '&' if '?' in base else '?'
+            if 'do=' not in base:
+                return f'{base}{sep}do=py'
+            return base
         key = getattr(self, 'siteKey', 'rou') or 'rou'
-        return f'{base}?do={key}&api=python'
+        sep = '&' if '?' in base else '?'
+        if 'do=' not in base:
+            return f'{base}{sep}do={key}&api=python'
+        return base
 
 
     def _get_headers(self, referer=None):
@@ -1106,35 +1146,35 @@ class Spider(BaseSpider):
         return None
 
     def playerContent(self, flag, id, vipFlags=None):
-        # ROU 的 /api/hls/ 是 PNG 包装 HLS，必须经代理解包。
-        # 默认走设备本地 localProxy（手机 IP 一般不被封）。
-        # 仅当配置了 worker 且你确认 CF 能拉到 rou.video 时才走 Worker。
+        # ROU /api/hls/ 是 PNG 包装 HLS，必须走代理（localProxy / Worker）解包。
+        # T4 必须用壳注入的 getProxyUrl()/t4_api，不能写死 UndCover。
         play = str(id)
-        if '/api/hls/' in play.lower():
+        if '/api/hls/' in play.lower() or play.lower().endswith('.png'):
             if self.workerProxy:
                 proxy_url = self.workerProxy.rstrip('/') + '?url=' + quote(play, safe='')
             else:
                 proxy_base = self._proxy_base()
-                # 同时带 url 明文 + token，兼容不同壳子取参方式
                 token = base64.urlsafe_b64encode(play.encode()).decode().rstrip('=')
+                # T4 常见参数名: url / target；同时附带 type、u
+                joiner = '&' if ('?' in proxy_base) else '?'
                 proxy_url = (
                     proxy_base
-                    + '&type=rou'
+                    + joiner + 'type=rou'
                     + '&url=' + quote(play, safe='')
+                    + '&target=' + quote(play, safe='')
                     + '&u=' + quote(token, safe='')
                 )
-            self._log(f'playerContent 代理: {proxy_url[:160]}')
+            self._log(f'playerContent 代理: {proxy_url[:200]}')
             return {
                 'parse': 0,
+                'jx': 0,
                 'playUrl': '',
                 'url': proxy_url,
-                'jx': 0,
                 'header': {
                     'Referer': self.host + '/',
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
                     'Origin': self.host,
                 },
-                'contentType': 'application/vnd.apple.mpegurl',
             }
         needs_parse = (flag == '解析')
         return {
