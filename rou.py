@@ -25,12 +25,13 @@ class Spider(BaseSpider):
     host = 'https://rou.video'
     cdn_host = 'https://v.rn252.xyz'
     localProxyUrl = 'http://127.0.0.1:UndCover/proxy'
-    # 可选：Cloudflare Worker 解包代理（部署 rou_hls_worker.js 后填入）
-    # 例：'https://rou-hls.你的账号.workers.dev'
-    # 也可通过 init(extend) 传入 JSON：{"worker":"https://..."}
+    # 注意：rou.video 会屏蔽 Cloudflare 机房 IP，Worker 拉 /api/hls/ 常 403。
+    # 默认请留空，走设备本地 localProxy。仅在你确认 Worker 能通时再填。
     workerProxy = ''
-    # 站点在配置里的 key，用于本地代理 do= 参数（必须与 json 配置 key 一致）
+    # 站点 key（配置 json 的 key），部分壳 do= 用这个
     siteKey = 'rou'
+    # 本地代理 do 模式: 'key' → do={siteKey}&api=python ； 'py' → do=py （9978 常见）
+    proxyDoMode = 'key'
     session = requests.Session()
     _debug = True
     _categories = []
@@ -69,6 +70,10 @@ class Spider(BaseSpider):
                 raw = param.get('url') or param.get('u') or ''
                 typ = param.get('type') or 'rou'
             if not raw:
+                # 兼容 u= token
+                if not isinstance(param, str):
+                    raw = param.get('u') or ''
+            if not raw:
                 return [400, 'text/plain', {'type': 'string'}, 'missing url']
             raw = unquote(str(raw))
             if not raw.startswith('http'):
@@ -81,6 +86,7 @@ class Spider(BaseSpider):
                     pass
             if raw.startswith('/'):
                 raw = self.host + raw
+            self._log(f'localProxy 拉取: {raw[:120]}')
 
             r = self.session.get(raw, headers={
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
@@ -158,11 +164,22 @@ class Spider(BaseSpider):
             return [500, 'text/plain', {'type': 'string'}, str(e)]
 
     def _proxy_base(self):
-        """本地代理前缀：do=站点key & api=python"""
-        key = getattr(self, 'siteKey', 'rou') or 'rou'
+        """本地代理前缀。
+
+        兼容：
+          - UndCover:  http://127.0.0.1:UndCover/proxy?do={key}&api=python
+          - 9978 壳:   http://127.0.0.1:9978/proxy?do=py
+        """
         base = getattr(self, 'localProxyUrl', 'http://127.0.0.1:UndCover/proxy')
         if 'do=' in base:
             return base
+        mode = getattr(self, 'proxyDoMode', 'key') or 'key'
+        if mode == 'py':
+            # 常见 9978 / FongMi 系
+            if ':9978' in base or base.rstrip('/').endswith('/proxy'):
+                return base.rstrip('/') + '?do=py'
+            return 'http://127.0.0.1:9978/proxy?do=py'
+        key = getattr(self, 'siteKey', 'rou') or 'rou'
         return f'{base}?do={key}&api=python'
 
 
@@ -444,21 +461,37 @@ class Spider(BaseSpider):
 
     def init(self, extend=''):
         self.session.headers.update(self._get_headers())
-        # extend 可传 worker 地址或 JSON
+        # extend 支持:
+        #   1) JSON: {"worker":"https://...","key":"rou","proxyDoMode":"py","localProxyUrl":"http://127.0.0.1:9978/proxy"}
+        #   2) 裸 Worker URL（不推荐：rou.video 常屏蔽 CF）
+        # 注意：Worker 若 403，请把 worker 设为空字符串，走设备本地 localProxy。
         if extend:
             try:
-                if isinstance(extend, str) and extend.strip().startswith('{'):
+                if isinstance(extend, dict):
+                    cfg = extend
+                elif isinstance(extend, str) and extend.strip().startswith('{'):
                     cfg = json.loads(extend)
-                    if cfg.get('worker'):
-                        self.workerProxy = str(cfg['worker']).rstrip('/')
-                    if cfg.get('key'):
-                        self.siteKey = str(cfg['key'])
-                    if cfg.get('siteKey'):
-                        self.siteKey = str(cfg['siteKey'])
                 elif isinstance(extend, str) and extend.startswith('http'):
                     self.workerProxy = extend.rstrip('/')
+                    cfg = {}
+                    self._log('警告: 已启用 Worker URL。若播放全失败请去掉 worker')
+                else:
+                    cfg = {}
+                if cfg.get('worker'):
+                    self.workerProxy = str(cfg['worker']).rstrip('/')
+                if cfg.get('key'):
+                    self.siteKey = str(cfg['key'])
+                if cfg.get('siteKey'):
+                    self.siteKey = str(cfg['siteKey'])
+                if cfg.get('proxyDoMode'):
+                    self.proxyDoMode = str(cfg['proxyDoMode'])
+                if cfg.get('localProxyUrl'):
+                    self.localProxyUrl = str(cfg['localProxyUrl'])
             except Exception as e:
                 self._log(f'init extend 解析失败: {e}')
+        if self.workerProxy:
+            self._log(f'Worker: {self.workerProxy}')
+        self._log(f'本地代理: {self._proxy_base()}')
         html = self._fetch(self.host + '/home')
         if html:
             self._home_data = self._extract_next_data(html)
@@ -467,6 +500,7 @@ class Spider(BaseSpider):
             if self._home_data:
                 self._log('__NEXT_DATA__ 结构:')
                 self._print_structure(self._home_data, max_depth=3)
+
 
     def _convert_video_items(self, items):
         result = []
@@ -1073,23 +1107,32 @@ class Spider(BaseSpider):
 
     def playerContent(self, flag, id, vipFlags=None):
         # ROU 的 /api/hls/ 是 PNG 包装 HLS，必须经代理解包。
-        # 优先 Cloudflare Worker；否则走本地 localProxy。
+        # 默认走设备本地 localProxy（手机 IP 一般不被封）。
+        # 仅当配置了 worker 且你确认 CF 能拉到 rou.video 时才走 Worker。
         play = str(id)
         if '/api/hls/' in play.lower():
             if self.workerProxy:
                 proxy_url = self.workerProxy.rstrip('/') + '?url=' + quote(play, safe='')
             else:
                 proxy_base = self._proxy_base()
+                # 同时带 url 明文 + token，兼容不同壳子取参方式
                 token = base64.urlsafe_b64encode(play.encode()).decode().rstrip('=')
-                proxy_url = proxy_base + '&type=rou&url=' + quote(token, safe='')
-            self._log(f'playerContent 代理: {proxy_url[:120]}...')
+                proxy_url = (
+                    proxy_base
+                    + '&type=rou'
+                    + '&url=' + quote(play, safe='')
+                    + '&u=' + quote(token, safe='')
+                )
+            self._log(f'playerContent 代理: {proxy_url[:160]}')
             return {
                 'parse': 0,
                 'playUrl': '',
                 'url': proxy_url,
+                'jx': 0,
                 'header': {
                     'Referer': self.host + '/',
-                    'User-Agent': 'Mozilla/5.0',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+                    'Origin': self.host,
                 },
                 'contentType': 'application/vnd.apple.mpegurl',
             }
@@ -1098,7 +1141,7 @@ class Spider(BaseSpider):
             'parse': 1 if needs_parse else 0,
             'url': play,
             'header': {
-                'Referer': self.host,
+                'Referer': self.host + '/',
                 'User-Agent': 'Mozilla/5.0',
             },
         }
