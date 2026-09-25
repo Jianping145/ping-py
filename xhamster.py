@@ -182,14 +182,39 @@ class Spider(Spider):
         if pic_m:
             pic = pic_m.group(1)
 
-        # 获取播放地址
+        # 获取播放地址 - 更灵活地匹配preload link
         play_url = ''
-        link_m = re.search(r'<link\s+rel=["\']preload["\']\s+as=["\']fetch["\'][^>]*href=["\']([^"\']+)["\']', html)
+        link_m = re.search(r'<link[^>]*rel=["\']preload["\'][^>]*href=["\']([^"\']*m3u8[^"\']*)["\']', html)
+        if not link_m:
+            link_m = re.search(r'href=["\']([^"\']*m3u8[^"\']*)["\']', html)
         if link_m:
             play_url = link_m.group(1)
 
+        # 构建播放地址 - 检测可用分辨率
+        play_url_str = ''
         if play_url:
-            play_url_str = f"多音画$666_{play_url}"
+            headers = {
+                'User-Agent': self.headers['User-Agent'],
+                'Referer': f'{self.host}/',
+            }
+            qualities = ['2160p', '1080p', '720p', '480p', '360p', '240p']
+            play_urls = []
+            available_qualities = []
+
+            for q in qualities:
+                q_url = play_url.replace('_TPL_', q)
+                if self.testUrl(q_url, headers):
+                    play_urls.append(f"{q}$666_{q_url}")
+                    available_qualities.append(q)
+
+            if play_urls:
+                play_url_str = '#'.join(play_urls)
+                # 如果没有4K，在标题中添加提示
+                if '2160p' not in available_qualities:
+                    title = title + ' [无4K]'
+            else:
+                # 所有分辨率都不可用，使用默认480p
+                play_url_str = f"480p$666_{play_url.replace('_TPL_', '480p')}"
         else:
             play_url_str = f"嗅探${url}"
 
@@ -218,6 +243,18 @@ class Spider(Spider):
         if id.startswith("666_"):
             p, url = 0, id[4:]
         return {'parse': p, 'url': url, 'header': headers}
+
+    def testUrl(self, url, headers):
+        """测试URL是否可访问"""
+        try:
+            resp = self.session.head(url, headers=headers, timeout=5, allow_redirects=True)
+            return resp.status_code == 200
+        except:
+            try:
+                resp = self.session.get(url, headers=headers, timeout=5, stream=True)
+                return resp.status_code == 200
+            except:
+                return False
 
     def localProxy(self, param):
         pass
