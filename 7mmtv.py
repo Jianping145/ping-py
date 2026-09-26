@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-7mmtv.sx TVBox / T4Api Spider - 修复版 v16
+7mmtv.sx TVBox / T4Api Spider - 修复版 v17
 修复：
-1. mvarr 解码索引错误（encoded/base 错位）导致部分线路解析失败
+1. mvarr 解码索引错误（encoded/base 错位）
 2. emturbovid/turboviplay 的 data-hash m3u8 提取
 3. mmvh/vidhide 类页面 Dean Edwards packer 解包提取 m3u8
-4. 國產等无 contentUrl 分类的兜底解析
+4. 國產影片：mvarr 加密 ID 解密（parseInt+XOR + AES-CBC）
 5. CDN referer / Origin 更准确
 """
 
@@ -239,34 +239,166 @@ class Spider(Spider):
             pass
         return None
 
+    def _extract_page_crypto_params(self, html):
+        """从页面提取 AES 解密参数（國產/部分分类 mvarr 加密用）"""
+        params = {
+            "xor_key": 26,
+            "radix": 8,
+            "aes_key": "9bed2afeec277724",
+            "aes_iv": "6e31f81c1836d9f7",
+        }
+        try:
+            m = re.search(r'hadeedg252\s*=\s*(\d+)', html)
+            if m:
+                params["xor_key"] = int(m.group(1))
+            m = re.search(r'hcdeedg252\s*=\s*(\d+)', html)
+            if m:
+                params["radix"] = int(m.group(1))
+            m = re.search(r"argdeqweqweqwe\s*=\s*'([^']+)'", html)
+            if m:
+                params["aes_key"] = m.group(1)
+            m = re.search(r"hdddedg252\s*=\s*'([^']+)'", html)
+            if m:
+                params["aes_iv"] = m.group(1)
+            # 兼容 d/f 后缀变量
+            if not re.search(r'hcdeedg252\s*=', html):
+                m = re.search(r'hcdeed[df]252\s*=\s*(\d+)', html)
+                if m:
+                    params["radix"] = int(m.group(1))
+            if not re.search(r'hadeedg252\s*=', html):
+                m = re.search(r'hadeed[df]252\s*=\s*(\d+)', html)
+                if m:
+                    params["xor_key"] = int(m.group(1))
+        except Exception:
+            pass
+        return params
+
+    def _aes_cbc_decrypt(self, ciphertext_b64, key_str, iv_str):
+        """AES-128-CBC 解密，返回明文。优先 cryptography / pycryptodome，否则 openssl。"""
+        import base64
+        try:
+            raw = base64.b64decode(ciphertext_b64)
+        except Exception:
+            return ""
+        key = key_str.encode("utf-8")[:16].ljust(16, b"\0")
+        iv = iv_str.encode("utf-8")[:16].ljust(16, b"\0")
+
+        # 1) cryptography
+        try:
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+            from cryptography.hazmat.backends import default_backend
+            cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+            pt = cipher.decryptor().update(raw) + cipher.decryptor().finalize()
+            if pt and 1 <= pt[-1] <= 16 and pt.endswith(bytes([pt[-1]]) * pt[-1]):
+                pt = pt[:-pt[-1]]
+            return pt.decode("utf-8", errors="ignore")
+        except Exception:
+            pass
+
+        # 2) pycryptodome
+        try:
+            from Crypto.Cipher import AES
+            from Crypto.Util.Padding import unpad
+            cipher = AES.new(key, AES.MODE_CBC, iv)
+            pt = unpad(cipher.decrypt(raw), 16)
+            return pt.decode("utf-8", errors="ignore")
+        except Exception:
+            pass
+
+        # 3) openssl CLI
+        try:
+            import subprocess, tempfile, os
+            key_hex = key.hex()
+            iv_hex = iv.hex()
+            with tempfile.NamedTemporaryFile(delete=False) as f:
+                f.write(raw)
+                ct_path = f.name
+            try:
+                out = subprocess.check_output(
+                    ["openssl", "enc", "-aes-128-cbc", "-d",
+                     "-K", key_hex, "-iv", iv_hex, "-in", ct_path],
+                    stderr=subprocess.DEVNULL, timeout=5,
+                )
+                return out.decode("utf-8", errors="ignore")
+            finally:
+                try:
+                    os.unlink(ct_path)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return ""
+
+    def _decode_mvarr_id(self, encoded, crypto_params=None):
+        """解密 mvarr 中的加密播放 ID
+        算法：split(sep) → parseInt(radix) XOR xor_key → fromCharCode → Base64 → AES-CBC
+        """
+        if not encoded:
+            return ""
+        # 旧格式：用 w 分隔的 hex token，直接去 w
+        if "w" in encoded and "i" not in encoded:
+            return encoded.replace("w", "")
+
+        params = crypto_params or {}
+        xor_key = params.get("xor_key", 26)
+        radix = params.get("radix", 8)
+        aes_key = params.get("aes_key", "9bed2afeec277724")
+        aes_iv = params.get("aes_iv", "6e31f81c1836d9f7")
+
+        try:
+            r = radix if radix <= 25 else radix % 25
+            if r < 2:
+                r = 8
+            sep = chr(r + 97)
+            parts = encoded.split(sep)
+            chars = []
+            for p in parts:
+                if not p:
+                    continue
+                v = int(p, r) ^ xor_key
+                chars.append(chr(v & 0xff))
+            b64 = "".join(chars)
+            if not b64:
+                return ""
+            # 若已经是明文 ID（无 AES）
+            if re.match(r"^[a-zA-Z0-9_-]+$", b64) and len(b64) < 20:
+                return b64
+            plain = self._aes_cbc_decrypt(b64, aes_key, aes_iv)
+            return plain.strip() if plain else ""
+        except Exception:
+            return ""
+
     def _extract_mvarr_urls(self, html):
         """提取mvarr中的所有播放器URL，按CDN优先级排序
         mvarr 结构: [['iframe_id','encoded','<iframe attrs>','base_url','','></iframe>','']]
         groups: 0=key, 1=id, 2=encoded, 3=attrs, 4=base, 5='', 6=close, 7=''
         """
         urls = []
+        crypto_params = self._extract_page_crypto_params(html)
         mvarr_matches = self._patterns['mvarr'].findall(html)
 
         for match in mvarr_matches:
             key = match[0]
-            encoded = match[2]          # 修正：原来错用 match[1]
-            iframe_base = match[4]      # 修正：原来错用 match[3]
+            encoded = match[2]
+            iframe_base = match[4]
 
-            clean_encoded = encoded.replace('w', '')
+            if not iframe_base or not encoded:
+                continue
 
-            if not iframe_base or not clean_encoded:
+            # 解密播放 ID
+            play_id = self._decode_mvarr_id(encoded, crypto_params)
+            if not play_id:
+                # 解密失败时跳过（避免把密文当 URL）
                 continue
 
             if iframe_base.startswith('//'):
-                full_url = 'https:' + iframe_base + clean_encoded
+                full_url = 'https:' + iframe_base + play_id
             elif iframe_base.startswith('http'):
-                full_url = iframe_base + clean_encoded
+                full_url = iframe_base + play_id
             else:
-                full_url = iframe_base + clean_encoded
+                full_url = iframe_base + play_id
 
-            # 过滤明显无效的 play.php 内部地址（需二次解析）以及广告
             if 'play.php?id=' in full_url:
-                # 保留但降优先级，优先使用 contentUrl / 其它 CDN
                 priority = 80
             elif self._is_ad_url(full_url):
                 continue
@@ -277,7 +409,14 @@ class Spider(Spider):
             urls.append((priority, full_url))
 
         urls.sort(key=lambda x: x[0])
-        return [url for _, url in urls]
+        # 去重保序
+        seen = set()
+        result = []
+        for u in (url for _, url in urls):
+            if u not in seen:
+                seen.add(u)
+                result.append(u)
+        return result
 
     def _extract_json_ld_content_url(self, html):
         """从JSON-LD中提取contentUrl"""
