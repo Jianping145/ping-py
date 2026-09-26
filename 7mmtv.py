@@ -1,7 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-7mmtv.sx TVBox / T4Api Spider - 最终完美版 v11
-支持所有分类，智能提取JSON-LD contentUrl + mvarr多播放器
+7mmtv.sx TVBox / T4Api Spider - 修复版 v16
+修复：
+1. mvarr 解码索引错误（encoded/base 错位）导致部分线路解析失败
+2. emturbovid/turboviplay 的 data-hash m3u8 提取
+3. mmvh/vidhide 类页面 Dean Edwards packer 解包提取 m3u8
+4. 國產等无 contentUrl 分类的兜底解析
+5. CDN referer / Origin 更准确
 """
 
 import re
@@ -69,7 +74,8 @@ class Spider(Spider):
             'playmogo': re.compile(r'["\'](https?://[^"\']*playmogo[^"\']*\.(?:m3u8|mp4)[^"\']*)["\']', re.I),
             'mmvh': re.compile(r'["\'](https?://[^"\']*mmvh[^"\']*\.(?:m3u8|mp4)[^"\']*)["\']', re.I),
             'mmsi': re.compile(r'["\'](https?://[^"\']*mmsi[^"\']*\.(?:m3u8|mp4)[^"\']*)["\']', re.I),
-            'cdn_mp4': re.compile(r'["\'](https?://[^"\']*1024cdn\.sx/[^"\']+\.mp4[^"\']*)["\']', re.I),
+            'custom_cdn': re.compile(r'["\'](https?://[^"\']*\.cyou/[^"\']*\.txt#\.m3u8[^"\']*)["\']', re.I),
+            'cdn_mp4': re.compile(r'["\'](https?://[^"\']*102[4-6]cdn\.sx/[^"\']+\.mp4[^"\']*)["\']', re.I),
             'cdn_video': re.compile(r'<video[^>]+data-src=["\']([^"\']+\.mp4[^"\']*)["\']', re.I),
             'source': re.compile(r'<source[^>]+src=["\']([^"\']+)["\']', re.I),
             'video': re.compile(r'<video[^>]+src=["\']([^"\']+)["\']', re.I),
@@ -80,15 +86,30 @@ class Spider(Spider):
             'data_src': re.compile(r'<iframe[^>]+data-src=["\']([^"\']+)["\']', re.I),
             'hls_url': re.compile(r'["\'](https?://[^"\']*\.(?:m3u8|m3u)[^"\']*)["\']', re.I),
             'mvarr': re.compile(r"mvarr\['(\d+_\d+)'\]=\[\['([^']+)','([^']+)','([^']+)','([^']+)','([^']*)','([^']+)','([^']*)'\],\];", re.I),
+            'quality_json': re.compile(r'\{"names":\[[^\]]+\],"urls":\[[^\]]+\],"headers":\[[^\]]+\]\}', re.I),
+            # v16 新增
+            'data_hash': re.compile(r'data-hash=["\'](https?://[^"\']+\.m3u8[^"\']*)["\']', re.I),
+            'any_m3u8': re.compile(r'(https?://[^\s"\'<>\\]+\.m3u8(?:\?[^\s"\'<>\\]*)?)', re.I),
+            'relative_m3u8': re.compile(r'["\'](/[^"\']*master\.m3u8[^"\']*)["\']', re.I),
+            'packer': re.compile(
+                r"eval\(function\(p,a,c,k,e,d\).*?\}\('(.*)',(\d+),(\d+),'(.*)'\.split\('\|'\)\)\)",
+                re.I | re.S
+            ),
         }
 
-        # CDN配置（优先级从高到低）
+        # CDN配置
         self.cdn_config = {
-            "mmvh02.com": {"referer": "https://mmvh02.com/", "origin": "https://mmvh02.com", "priority": 1},
-            "playmogo.com": {"referer": "https://playmogo.com/", "origin": "https://playmogo.com", "priority": 2},
+            "mmvh02.com": {"referer": "https://mmtv01.xyz/", "origin": "https://mmtv01.xyz", "priority": 1},
+            "mmvh": {"referer": "https://mmtv01.xyz/", "origin": "https://mmtv01.xyz", "priority": 1},
+            "playmogo.com": {"referer": "https://7mmtv.sx/", "origin": "https://7mmtv.sx", "priority": 2},
             "emturbovid.com": {"referer": "https://emturbovid.com/", "origin": "https://emturbovid.com", "priority": 3},
+            "turboviplay.com": {"referer": "https://emturbovid.com/", "origin": "https://emturbovid.com", "priority": 3},
             "mmsi02.com": {"referer": "https://mmsi02.com/", "origin": "https://mmsi02.com", "priority": 4},
-            "turbosplayer.com": {"referer": "https://7mmtv.sx/", "origin": "https://7mmtv.sx", "priority": 5},
+            "turbosplayer.com": {"referer": "https://mmtv01.xyz/", "origin": "https://mmtv01.xyz", "priority": 5},
+            "cyou": {"referer": "https://7mmtv.sx/", "origin": "https://7mmtv.sx", "priority": 6},
+            "vidhide": {"referer": "https://mmtv01.xyz/", "origin": "https://mmtv01.xyz", "priority": 1},
+            "dramiyos": {"referer": "https://mmtv01.xyz/", "origin": "https://mmtv01.xyz", "priority": 1},
+            "harbortraildesignstudio": {"referer": "https://mmtv01.xyz/", "origin": "https://mmtv01.xyz", "priority": 1},
         }
 
         # 缓存
@@ -219,17 +240,22 @@ class Spider(Spider):
         return None
 
     def _extract_mvarr_urls(self, html):
-        """提取mvarr中的所有播放器URL，按CDN优先级排序"""
+        """提取mvarr中的所有播放器URL，按CDN优先级排序
+        mvarr 结构: [['iframe_id','encoded','<iframe attrs>','base_url','','></iframe>','']]
+        groups: 0=key, 1=id, 2=encoded, 3=attrs, 4=base, 5='', 6=close, 7=''
+        """
         urls = []
         mvarr_matches = self._patterns['mvarr'].findall(html)
 
         for match in mvarr_matches:
-            key = match[0]  # 如 '28_1'
-            encoded = match[1]  # 编码的ID
-            iframe_base = match[3]  # 基础URL如 'https://playmogo.com/e/'
+            key = match[0]
+            encoded = match[2]          # 修正：原来错用 match[1]
+            iframe_base = match[4]      # 修正：原来错用 match[3]
 
-            # 直接使用编码作为URL参数（移除w分隔符）
             clean_encoded = encoded.replace('w', '')
+
+            if not iframe_base or not clean_encoded:
+                continue
 
             if iframe_base.startswith('//'):
                 full_url = 'https:' + iframe_base + clean_encoded
@@ -238,13 +264,18 @@ class Spider(Spider):
             else:
                 full_url = iframe_base + clean_encoded
 
-            if not self._is_ad_url(full_url):
-                # 获取CDN优先级
+            # 过滤明显无效的 play.php 内部地址（需二次解析）以及广告
+            if 'play.php?id=' in full_url:
+                # 保留但降优先级，优先使用 contentUrl / 其它 CDN
+                priority = 80
+            elif self._is_ad_url(full_url):
+                continue
+            else:
                 cdn_config = self._get_cdn_config(full_url)
-                priority = cdn_config.get("priority", 99) if cdn_config else 99
-                urls.append((priority, full_url))
+                priority = cdn_config.get("priority", 50) if cdn_config else 50
 
-        # 按优先级排序
+            urls.append((priority, full_url))
+
         urls.sort(key=lambda x: x[0])
         return [url for _, url in urls]
 
@@ -257,11 +288,8 @@ class Spider(Spider):
             try:
                 data = json.loads(script_content)
                 if isinstance(data, dict):
-                    # 主VideoObject
                     if data.get("@type") == "VideoObject":
                         content_url = data.get("contentUrl", "") or data.get("embedUrl", "")
-
-                    # 嵌套video数组
                     videos = data.get("video", [])
                     if isinstance(videos, list):
                         for v in videos:
@@ -276,6 +304,22 @@ class Spider(Spider):
                 break
 
         return content_url
+
+    def _parse_quality_json(self, html):
+        """解析多清晰度JSON格式"""
+        try:
+            m = self._patterns['quality_json'].search(html)
+            if m:
+                data = json.loads(m.group(0))
+                if "urls" in data and len(data["urls"]) > 0:
+                    # 返回第一个URL（通常是最高清晰度）
+                    url = data["urls"][0]
+                    # 清理URL（移除#isVideo=true#等后缀）
+                    url = url.split('#')[0]
+                    return url
+        except Exception:
+            pass
+        return ""
 
     # ---------------------------------------------------------
     # 分类
@@ -317,7 +361,6 @@ class Spider(Spider):
             videos = []
 
             if soup:
-                # 提取所有视频卡片
                 for col_item in soup.find_all("div", class_="col-item"):
                     a_tag = col_item.find("a", href=re.compile(r"_content/"))
                     if not a_tag:
@@ -337,13 +380,11 @@ class Spider(Spider):
                     if not href or not title:
                         continue
 
-                    # 提取封面
                     pic = ""
                     img = col_item.find("img")
                     if img:
                         pic = self._img(img, url)
 
-                    # 提取日期
                     remarks = ""
                     date_span = col_item.find("span", class_="text-muted")
                     if date_span:
@@ -359,7 +400,6 @@ class Spider(Spider):
                         "vod_remarks": remarks,
                     })
 
-            # 备用：正则提取
             if not videos:
                 seen = set()
                 pattern = re.compile(
@@ -420,7 +460,6 @@ class Spider(Spider):
             if not detail_url.startswith("http"):
                 detail_url = self._abs(detail_url)
 
-            # 检查缓存
             if detail_url in self._content_url_cache:
                 content_url = self._content_url_cache[detail_url]
                 vod = self._build_vod(detail_url, "", "", "", "", "", "", "", "", "", content_url)
@@ -458,12 +497,10 @@ class Spider(Spider):
                         pic = src
                         break
 
-                # ===== 多模式视频源提取（优先级从高到低） =====
-
-                # 模式1: JSON-LD contentUrl（最可靠）
+                # 模式1: JSON-LD contentUrl
                 content_url = self._extract_json_ld_content_url(html)
 
-                # 模式2: mvarr解密（备用）
+                # 模式2: mvarr解密
                 if not content_url:
                     mvarr_urls = self._extract_mvarr_urls(html)
                     if mvarr_urls:
@@ -480,7 +517,7 @@ class Spider(Spider):
                     if m:
                         content_url = m.group(1)
 
-                # 模式4: 直链MP4（amateurjav/amateur分类）
+                # 模式4: 直链MP4
                 if not content_url:
                     video_matches = self._patterns['cdn_video'].findall(html)
                     for mp4_url in video_matches:
@@ -653,7 +690,7 @@ class Spider(Spider):
         return result
 
     # ---------------------------------------------------------
-    # 播放解析
+    # 播放解析 - 修复版
     # ---------------------------------------------------------
     def playerContent(self, flag, id, vipFlags):
         try:
@@ -670,7 +707,7 @@ class Spider(Spider):
                 "Accept-Encoding": "identity",
             }
 
-            # 1. 直接媒体地址（1024cdn.sx直链MP4）
+            # 1. 直接媒体地址
             if self.isVideoFormat(url):
                 referer = self._guess_referer(url)
                 play_headers["Referer"] = referer
@@ -725,50 +762,120 @@ class Spider(Spider):
         except Exception:
             return {"parse": 1, "jx": 1, "playUrl": "", "url": str(id or "")}
 
-    def _parse_cdn_url(self, url, cdn_config):
-        """通用CDN解析"""
+
+    def _to_base(self, n, base):
+        if n == 0:
+            return '0'
+        digits = '0123456789abcdefghijklmnopqrstuvwxyz'
+        s = ''
+        while n:
+            s = digits[n % base] + s
+            n //= base
+        return s
+
+    def _unpack_packer(self, html):
+        """解包 Dean Edwards packer，返回解包后的 JS 文本"""
         try:
-            html, status = self._get_stream(url, referer="https://7mmtv.sx/", timeout=8, max_bytes=65536)
-            if not html or status != 200:
-                return ""
+            m = self._patterns['packer'].search(html)
+            if not m:
+                return ''
+            p, a, c, ks = m.group(1), int(m.group(2)), int(m.group(3)), m.group(4).split('|')
+            p = p.replace("\\'", "'").replace("\\\\", "\\")
+            while c:
+                c -= 1
+                if c < len(ks) and ks[c]:
+                    token = self._to_base(c, a)
+                    p = re.sub(r'\b' + re.escape(token) + r'\b', ks[c], p)
+            return p
+        except Exception:
+            return ''
 
-            patterns_to_try = [
-                ('turbos', True),
-                ('m3u8', False),
-                ('source', True),
-                ('video', True),
-                ('mp4', False),
-                ('emturbo', False),
-                ('playmogo', False),
-                ('mmvh', False),
-                ('mmsi', False),
-            ]
+    def _extract_media_from_html(self, html, base_url=''):
+        """从播放页 HTML 中提取真实 m3u8/mp4 地址（含 packer / data-hash）"""
+        if not html:
+            return ''
 
-            for pattern_name, need_check in patterns_to_try:
-                m = self._patterns[pattern_name].search(html)
-                if m:
-                    video_url = m.group(1)
-                    if need_check:
-                        if self.isVideoFormat(video_url):
-                            return video_url
-                    else:
+        # 1. data-hash（emturbovid / turboviplay）
+        m = self._patterns['data_hash'].search(html)
+        if m:
+            return m.group(1).split('#')[0]
+
+        # 2. quality_json
+        quality_url = self._parse_quality_json(html)
+        if quality_url:
+            return quality_url
+
+        # 3. 解包 packer 后再提取（mmvh / vidhide）
+        unpacked = self._unpack_packer(html)
+        search_html = unpacked if unpacked else html
+
+        # 优先绝对 m3u8
+        for pat_name in ('any_m3u8', 'm3u8', 'hls_url'):
+            m = self._patterns[pat_name].search(search_html)
+            if m:
+                u = m.group(1).split('#')[0]
+                if u.startswith('http') and not self._is_ad_url(u):
+                    return u
+
+        # 相对 master.m3u8
+        m = self._patterns['relative_m3u8'].search(search_html)
+        if m and base_url:
+            return urljoin(base_url, m.group(1).split('#')[0])
+
+        # 其它模式
+        patterns_to_try = [
+            ('turbos', True),
+            ('custom_cdn', False),
+            ('source', True),
+            ('video', True),
+            ('mp4', False),
+            ('emturbo', False),
+            ('playmogo', False),
+            ('mmvh', False),
+            ('mmsi', False),
+            ('cdn_mp4', False),
+        ]
+        for pattern_name, need_check in patterns_to_try:
+            m = self._patterns[pattern_name].search(search_html)
+            if m:
+                video_url = m.group(1).split('#')[0]
+                if need_check:
+                    if self.isVideoFormat(video_url):
+                        return video_url
+                else:
+                    if video_url.startswith('http') and not self._is_ad_url(video_url):
                         return video_url
 
-            return ""
+        return ''
+
+    def _parse_cdn_url(self, url, cdn_config):
+        """CDN解析 - 支持turbosplayer / emturbovid / mmvh / playmogo 等"""
+        try:
+            referer = cdn_config.get("referer") or self.base
+            html, status = self._get_stream(url, referer=referer, timeout=12, max_bytes=400000)
+            if not html:
+                return ""
+            # Cloudflare 挑战页直接放弃
+            if 'Just a moment' in html or 'cf-browser-verification' in html or status in (403, 503):
+                # 再试一次无 stream 限制
+                html = self._get(url, referer=referer, timeout=12)
+                if not html or 'Just a moment' in html:
+                    return ""
+
+            media = self._extract_media_from_html(html, base_url=url)
+            return media
 
         except Exception:
             return ""
 
     def _parse_7mmtv_detail(self, url, play_headers):
         """解析7mmtv详情页"""
-        # 检查缓存
         if url in self._content_url_cache:
             content_url = self._content_url_cache[url]
             result = self._try_play_url(content_url, play_headers)
             if result:
                 return result
 
-        # 获取详情页
         html = self._get(url, self.base, timeout=8)
         if not html:
             return {
@@ -776,13 +883,12 @@ class Spider(Spider):
                 "header": {"User-Agent": play_headers["User-Agent"], "Referer": self.base},
             }
 
-        # 多模式提取
         content_url = ""
 
-        # 模式1: JSON-LD contentUrl（最可靠）
+        # 模式1: JSON-LD contentUrl
         content_url = self._extract_json_ld_content_url(html)
 
-        # 模式2: mvarr解密（备用）
+        # 模式2: mvarr解密
         if not content_url:
             mvarr_urls = self._extract_mvarr_urls(html)
             if mvarr_urls:
@@ -822,14 +928,12 @@ class Spider(Spider):
                     content_url = full_src
                     break
 
-        # 尝试播放
         if content_url:
             self._content_url_cache[url] = content_url
             result = self._try_play_url(content_url, play_headers)
             if result:
                 return result
 
-        # 兜底
         return {
             "parse": 1, "jx": 1, "playUrl": "", "url": url,
             "header": {"User-Agent": play_headers["User-Agent"], "Referer": self.base},
@@ -840,7 +944,7 @@ class Spider(Spider):
         if not url:
             return None
 
-        # 直接媒体格式（1024cdn.sx直链）
+        # 直接媒体格式
         if self.isVideoFormat(url):
             referer = self._guess_referer(url)
             play_headers["Referer"] = referer
@@ -894,32 +998,17 @@ class Spider(Spider):
             return ""
 
         try:
-            html, status = self._get_stream(url, referer=self.base, timeout=8, max_bytes=131072)
-            if not html or status != 200:
+            html, status = self._get_stream(url, referer=self.base, timeout=12, max_bytes=400000)
+            if not html:
                 return ""
+            if 'Just a moment' in html or status in (403, 503):
+                html = self._get(url, referer=self.base, timeout=12)
+                if not html or 'Just a moment' in html:
+                    return ""
 
-            patterns_to_try = [
-                ('turbos', True),
-                ('emturbo', False),
-                ('playmogo', False),
-                ('mmvh', False),
-                ('mmsi', False),
-                ('m3u8', False),
-                ('source', True),
-                ('video', True),
-                ('mp4', False),
-                ('cdn_mp4', False),
-            ]
-
-            for pattern_name, need_check in patterns_to_try:
-                m = self._patterns[pattern_name].search(html)
-                if m:
-                    video_url = m.group(1)
-                    if need_check:
-                        if self.isVideoFormat(video_url):
-                            return video_url
-                    else:
-                        return video_url
+            media = self._extract_media_from_html(html, base_url=url)
+            if media:
+                return media
 
             # 嵌套iframe - 递归穿透
             iframes = self._patterns['iframe_src'].findall(html)
@@ -940,14 +1029,16 @@ class Spider(Spider):
             parsed = urlparse(url)
             domain = parsed.netloc.lower()
 
-            # CDN域名
             cdn_config = self._get_cdn_config(url)
             if cdn_config:
                 return cdn_config["referer"]
 
-            # 1024cdn.sx 图片/视频CDN
-            if "1024cdn" in domain or "1025cdn" in domain or "1026cdn" in domain:
+            if any(x in domain for x in ("1024cdn", "1025cdn", "1026cdn", "n39s.", "n3.")):
                 return "https://7mmtv.sx/"
+            if "turboviplay" in domain or "emturbo" in domain:
+                return "https://emturbovid.com/"
+            if any(x in domain for x in ("dramiyos", "harbortrail", "vidhide", "mmvh")):
+                return "https://mmtv01.xyz/"
 
             return self.base
         except Exception:
