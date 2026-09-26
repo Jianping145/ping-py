@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-7mmtv.sx TVBox / T4Api Spider - 修复版 v17
+7mmtv.sx TVBox / T4Api Spider - 修复版 v18
 修复：
 1. mvarr 解码索引错误（encoded/base 错位）
 2. emturbovid/turboviplay 的 data-hash m3u8 提取
 3. mmvh/vidhide 类页面 Dean Edwards packer 解包提取 m3u8
 4. 國產影片：mvarr 加密 ID 解密（parseInt+XOR + AES-CBC）
-5. CDN referer / Origin 更准确
+5. 多线路：SW/TV/VH/DO/SP 全部返回（网页多线路多清晰度）
+6. CDN referer / Origin 更准确
 """
 
 import re
@@ -335,9 +336,13 @@ class Spider(Spider):
         """
         if not encoded:
             return ""
-        # 旧格式：用 w 分隔的 hex token，直接去 w
+        # 旧格式：用 w 分隔的 hex token —— 多数无法直接得到有效 ID，返回空
+        # （此类页面通常有 JSON-LD contentUrl 可用）
         if "w" in encoded and "i" not in encoded:
-            return encoded.replace("w", "")
+            cleaned = encoded.replace("w", "")
+            if re.match(r'^[a-zA-Z0-9_-]{4,40}$', cleaned):
+                return cleaned
+            return ""
 
         params = crypto_params or {}
         xor_key = params.get("xor_key", 26)
@@ -364,7 +369,11 @@ class Spider(Spider):
             if re.match(r"^[a-zA-Z0-9_-]+$", b64) and len(b64) < 20:
                 return b64
             plain = self._aes_cbc_decrypt(b64, aes_key, aes_iv)
-            return plain.strip() if plain else ""
+            plain = (plain or "").strip()
+            # 校验：播放 ID 应为较短的字母数字串
+            if plain and re.match(r'^[a-zA-Z0-9_-]{4,40}$', plain):
+                return plain
+            return ""
         except Exception:
             return ""
 
@@ -406,16 +415,27 @@ class Spider(Spider):
                 cdn_config = self._get_cdn_config(full_url)
                 priority = cdn_config.get("priority", 50) if cdn_config else 50
 
-            urls.append((priority, full_url))
+            # 线路名：根据 mvarr key 前缀映射（与网页 SW/TV/VH/DO/SP 一致）
+            key_prefix = key.split('_')[0] if key else ''
+            name_map = {
+                '37': 'SW',   # mmsi
+                '38': 'VH',   # mmvh
+                '28': 'DO',   # playmogo
+                '40': 'TV',   # emturbovid
+                '42': 'SP',   # play.php / 备用
+            }
+            line_name = name_map.get(key_prefix, f'线路{key_prefix or len(result)+1}')
+
+            urls.append((priority, line_name, full_url))
 
         urls.sort(key=lambda x: x[0])
-        # 去重保序
+        # 去重保序，返回 [(name, url), ...]
         seen = set()
         result = []
-        for u in (url for _, url in urls):
-            if u not in seen:
-                seen.add(u)
-                result.append(u)
+        for priority, name, url in urls:
+            if url not in seen:
+                seen.add(url)
+                result.append((name, url))
         return result
 
     def _extract_json_ld_content_url(self, html):
@@ -622,6 +642,7 @@ class Spider(Spider):
             desc = ""
             iframe_url = ""
             content_url = ""
+            play_lines = []
 
             if soup:
                 h1 = soup.find("h1")
@@ -636,35 +657,36 @@ class Spider(Spider):
                         pic = src
                         break
 
-                # 模式1: JSON-LD contentUrl
+                # 收集全部播放线路 [(name, url), ...]
+                # 模式1: JSON-LD contentUrl（作为主线路之一）
                 content_url = self._extract_json_ld_content_url(html)
 
-                # 模式2: mvarr解密
-                if not content_url:
-                    mvarr_urls = self._extract_mvarr_urls(html)
-                    if mvarr_urls:
-                        content_url = mvarr_urls[0]
+                # 模式2: mvarr 解密（多线路 SW/TV/VH/DO/SP）
+                mvarr_urls = self._extract_mvarr_urls(html)
+                if mvarr_urls:
+                    play_lines.extend(mvarr_urls)
+                    if not content_url:
+                        content_url = mvarr_urls[0][1]
 
-                # 模式3: 正则contentUrl / embedUrl
+                # 模式3: 正则 contentUrl / embedUrl
                 if not content_url:
                     m = self._patterns['content_url'].search(html)
                     if m:
                         content_url = m.group(1)
-
                 if not content_url:
                     m = self._patterns['embed_url'].search(html)
                     if m:
                         content_url = m.group(1)
 
-                # 模式4: 直链MP4
+                # 模式4: 直链 MP4
                 if not content_url:
                     video_matches = self._patterns['cdn_video'].findall(html)
                     for mp4_url in video_matches:
-                        if "1024cdn.sx" in mp4_url and not self._is_ad_url(mp4_url):
+                        if "1024cdn" in mp4_url and not self._is_ad_url(mp4_url):
                             content_url = mp4_url
                             break
 
-                # 模式5: CDN MP4正则
+                # 模式5: CDN MP4
                 if not content_url:
                     cdn_matches = self._patterns['cdn_mp4'].findall(html)
                     for mp4_url in cdn_matches:
@@ -672,7 +694,7 @@ class Spider(Spider):
                             content_url = mp4_url
                             break
 
-                # 模式6: HLS/MP4通用
+                # 模式6: HLS/MP4 通用
                 if not content_url:
                     m = self._patterns['hls_url'].search(html)
                     if m:
@@ -686,7 +708,7 @@ class Spider(Spider):
                             if m:
                                 content_url = m.group(1)
 
-                # 模式7: 查找非广告iframe
+                # 模式7: 非广告 iframe
                 if not content_url:
                     iframes = self._patterns['iframe_src'].findall(html)
                     for src in iframes:
@@ -694,6 +716,23 @@ class Spider(Spider):
                         if not self._is_ad_url(full_src):
                             iframe_url = full_src
                             break
+
+                # 若 JSON-LD contentUrl 不在 mvarr 线路中，补为主线路
+                if content_url:
+                    existing = {u for _, u in play_lines}
+                    if content_url not in existing:
+                        # 根据域名猜测线路名
+                        cu = content_url.lower()
+                        if 'emturbo' in cu:
+                            play_lines.insert(0, ('TV', content_url))
+                        elif 'mmvh' in cu:
+                            play_lines.insert(0, ('VH', content_url))
+                        elif 'playmogo' in cu:
+                            play_lines.insert(0, ('DO', content_url))
+                        elif 'mmsi' in cu:
+                            play_lines.insert(0, ('SW', content_url))
+                        else:
+                            play_lines.insert(0, ('主线', content_url))
 
                 # 提取元数据
                 text = self._clean(soup.get_text(" ", strip=True))
@@ -730,10 +769,20 @@ class Spider(Spider):
             if not title:
                 title = code or "7mmtv"
 
-            play_url = content_url or iframe_url or detail_url
+            # 组装多线路
+            if not play_lines:
+                fallback = content_url or iframe_url or detail_url
+                play_lines = [('播放', fallback)]
 
             if content_url:
                 self._content_url_cache[detail_url] = content_url
+
+            # TVBox 多线路格式: from 用 $$$ 分隔，url 用 $$$ 分隔
+            from_list = []
+            url_list = []
+            for name, url in play_lines:
+                from_list.append(name)
+                url_list.append(f"CD1${url}")
 
             vod = {
                 "vod_id": detail_url,
@@ -747,8 +796,8 @@ class Spider(Spider):
                 "vod_remarks": duration,
                 "vod_pubdate": publisher,
                 "vod_class": category,
-                "vod_play_from": "7mmtv",
-                "vod_play_url": "播放$" + play_url,
+                "vod_play_from": "$$$".join(from_list),
+                "vod_play_url": "$$$".join(url_list),
             }
 
             if maker and not vod["vod_pubdate"]:
@@ -1031,7 +1080,7 @@ class Spider(Spider):
         if not content_url:
             mvarr_urls = self._extract_mvarr_urls(html)
             if mvarr_urls:
-                content_url = mvarr_urls[0]
+                content_url = mvarr_urls[0][1]
 
         # 模式3: 正则contentUrl / embedUrl
         if not content_url:
