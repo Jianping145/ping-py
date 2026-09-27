@@ -140,10 +140,36 @@ class Spider(Spider):
                 "loginPost": "f/McWqt3qQmO1valgxO9cg6KSKjCLTlrefZ/zhmkW0WzIK/byg0hIZEEM8pDKJ+kDjQKHaJQaI/37JL4gCOr/u7ZhHAqjMdefe1M8nsIeyIe0UqhVAc9jvPcbceUwRaSNHXuacmxQYyIWXhp/YU+n6UajDp9EAgxOJqrit5fvcA=",
             },
             "madoubuke": {"name": "麻豆不可", "domain": "", "num": ""},
-            "91pro": {"name": "91Pro", "domain": "", "num": ""},
-            "yourporn": {"name": "YourPorn", "domain": "", "num": ""},
+            "91pro": {
+                "name": "91Pro",
+                "domain": "https://5fbl.gv8y8x2z.top/front/",
+                "num": "27",
+                "loginToken": "2b2934a2a97f472aafe2c4ae0180a310.448Qf1E/AfEWgXKoc/BSSWT7rkRogm4kchvpFu/LupKsTVDSh2iNcy5R64MjAAxsed6+H+oK9xYRfGRu7N7Rk7+eLnTX0tFw1AwXvilOophvIBTGB7R2UrBY1w9yscrUCpT/s8rZ2afyiYVWCurOEiEhUkJ6tXZV.9c8619f9bff46ee883689c4e6a292aba",
+                "loginPost": "AY3BRkcTtaPSGVdnyMIZlos9LbAreNrJ6BkoxKpMqu557PB4xPyvxLmU25+9NeRfSb4Xk/ulQY+p/qGTFG1l+C0M8QC0gVCrsJqkztdAVH9LfnFq8n9xyzltp23BwiCHP6m0IJIxbdvMX+Bi1ePRSzhOm6RnXl0pXYfsY2L0Tgs=",
+            },
+            "yourporn": {
+                "name": "YourPorn",
+                "domain": "https://m22oxrm.9n8rvmm7.top/front/",
+                "num": "08",
+                "loginToken": "4825ce4d64494d84ae6ff2d7e97094dd.kNX+UoZzrsLzz2xSjYus//TKGWlRcZ0fI1TCsXvk9PDCX0/Uov0EoZJqBWNfH1ML41TLVEzbFNS7Zh8//ePpDJfZyX/d5xjb0qdM73kknOSI4b5LGcq0Uj/BfR6SJ079AXco3vJTRDEQsmmd7ExpAnWuuPw7TX34r6ZneoLFjbU=.adf82ea0e9a4a1e7d082e96cc235d2f2",
+                "loginPost": "Ytq2N7KSlmoSVpL9wY8/H6E0j+j38tn/icFFh7o0502BoUgczVAhNKEjuTxmU5Y+hVnPe08YBhi3/81m4I0RGOECe1efd3PH1YNIhY+TGnm5wZq5EOduHio47PRbPU6UpHrT8XLnJ9cY1Ux3SfYNilzPUb3qWUpoShpHUh2s8DU=",
+            },
             "sesedaren": {"name": "色色达人", "domain": "", "num": ""},
             "chiguashipin": {"name": "吃瓜视频", "domain": "", "num": ""},
+            "guatalang": {
+                "name": "瓜太郎",
+                "domain": "https://22.uk8kvpt8.top/front/",
+                "num": "245",
+                "loginToken": "2c23f0586b834568bc27ba5f18372712.rpnAX5AFyhMmDXWaSxYVW9FPiPLlNW/+98fI33Z/h5rWRnBirqQsuhAXUWsjumpN2gjbEvYChMoo5srq046J4fCe8PU8MKV5U2eHZybAW5ALRrKNr8O4c4Aa4fflvqZwW8vbnHDIrlJSi/QLE6KyhqWvstgyg9TQ.36b2aa8185abbc9dee24cd4695252d0e",
+                "loginPost": "AmxKXAU10S5UaFeBhY83oyuL9tV/NPf26nVQZkcsgm/ir89TTQnObaWTzoeEHYRJgU6WsN8371f0IhqXEZh8YVlWmP1SZBPP2NAWx8CwUgcgzHsK2euVhIoRCUoXaW21NBkJoI6gI/fNYMLCiQ8EXMzZDylRE/0TeglyYeYunqo=",
+            },
+            "wuyefuli": {
+                "name": "午夜福利",
+                "domain": "https://0mz.2d5v5th7.top/front/",
+                "num": "68",
+                "loginToken": "4e9520f7f9304d34b204ff211129cade.hP/juXJ+tTw45yZ/nJfM5XVqm3TtKSj0kLSTrkid38ZlozaHMJYURjesBU5Oy4SgoCCzwHMzxchgTP9UD+hHgy081N2r+GCE0uHkmEyLX8CXVaE8Ui6ZRZ2jEXtpf+gAqLWgP/UG0OEAFzVQ3QkjYCLOExQoXB9u.3f839a61b8cc225ea169114956a3f0a3",
+                "loginPost": "QxmY9GFkQak8qC6YXBelvYh4ntbSkacqs99ad0IUgxYt2CeVWVLg/Ru9/t6Pdx0wV8oeQN4OeNUs/FQLIZ0DNqiKqyt2ioA/LLfqfIq5dds/C0jEkVjP/5RpLbmVm5evKmyJ9KEjSL6gZqZU/owPJQik4h3LFoT9w1I0tf9xeAM=",
+            },
         }
 
     def err(self, msg):
