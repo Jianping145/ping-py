@@ -428,34 +428,15 @@ class Spider(_Base):
             return {"list": []}
 
     def playerContent(self, flag, id, vipFlags):
-        """播放：蜂蜜影视需要带 Referer 的 header，且常用 JSON 字符串格式"""
         try:
-            ua = self.headers.get("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
-            # 字典形式（PeekPro 等）
-            header_dict = {
-                "User-Agent": ua,
-                "Referer": "https://www.xnxx.com/",
-                "Origin": "https://www.xnxx.com",
-                "Accept": "*/*",
+            header = {
+                "User-Agent": self.headers["User-Agent"],
+                "Referer": "https://www.xnxx.com/"
             }
-            # JSON 字符串形式（蜂蜜影视 / 部分 TVBox 更认这个）
-            header_str = json.dumps(header_dict)
-            return {
-                "parse": 0,
-                "url": id,
-                "header": header_str,
-                # 部分壳读 jx / headers 字段
-                "headers": header_str,
-            }
+            # 原版用 json.dumps；部分壳要 dict。两种都试：优先 dict，再给字符串兼容
+            return {"parse": 0, "url": id, "header": header}
         except Exception:
-            return {
-                "parse": 0,
-                "url": id,
-                "header": json.dumps({
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "Referer": "https://www.xnxx.com/",
-                })
-            }
+            return {"parse": 0, "url": id, "header": {}}
 
     def searchContent(self, key, quick, pg="1"):
         try:
