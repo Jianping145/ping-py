@@ -43,14 +43,14 @@ class Spider(Spider):
         self.session.headers.update(self.headers)
         self.themes = [("2", "角色剧情"), ("3", "中文字幕"), ("4", "制服诱惑"), ("5", "直接开啪"), ("6", "丝袜美腿"), ("7", "捆绑调教"), ("8", "多P群交"), ("10", "羞辱强暴"), ("11", "无码高清"), ("14", "乱伦伦理"), ("15", "人妻诱惑"), ("17", "网黄精选")]
         self.theme_sorts = [{"n": "近期最佳", "v": "hot"}, {"n": "今日更新", "v": "update"}, {"n": "最多观看", "v": "watch"}, {"n": "最高收藏", "v": "favorite"}]
-        self.categories = [{"type_id": "/new", "type_name": "最新更新"}, {"type_id": "/theme/detail/3/update", "type_name": "中文字幕"}, {"type_id": "/theme/detail/11/hot", "type_name": "无码高清"}, {"type_id": "/theme", "type_name": "专题合集"}, {"type_id": "/actress/hot", "type_name": "热门女优"}]
+        self.categories = [{"type_id": "/new", "type_name": "最新更新"}, {"type_id": "/theme/detail/3/update", "type_name": "中文字幕"}, {"type_id": "/theme/detail/11/hot", "type_name": "无码高清"}, {"type_id": "/theme", "type_name": "专题合集"}, {"type_id": "/actress/hot", "type_name": "热门女优"}, {"type_id": "/heiliao", "type_name": "黑料"}]
         self.filters = {
             "/theme/detail/3/update": [{"key": "sort", "name": "排序", "value": self.theme_sorts}],
             "/theme/detail/11/hot": [{"key": "sort", "name": "排序", "value": self.theme_sorts}],
             "/theme": [{"key": "sort", "name": "排序", "value": [{"n": "预设排序", "v": "sort"}, {"n": "热度优先", "v": "check_num"}, {"n": "最多影片", "v": "count"}]}],
             "/actress/hot": [{"key": "sort", "name": "排序", "value": [{"n": "热度优先", "v": "hot"}, {"n": "最多影片", "v": "count"}]}],
         }
-        self.tids = {"/new": "/new", "/theme": "/theme", "/actress/hot": "/actress/hot"}
+        self.tids = {"/new": "/new", "/theme": "/theme", "/actress/hot": "/actress/hot", "/heiliao": "/heiliao"}
         self._filters_actress = []
         for tid, name in self.themes:
             self.tids["/theme/detail/%s/update" % tid] = "/theme/detail/%s/update" % tid
@@ -257,6 +257,94 @@ class Spider(Spider):
             except Exception:
                 continue
         return out
+    def _heiliao_list(self, html):
+        out = []
+        seen = set()
+        # 黑料列表页：直接解析 HTML 中的 /heiliao/post/ 链接
+        # 尝试匹配整个 <a> 标签块
+        for m in re.finditer(r'<a\s+href="(/heiliao/post/\d+)"[^>]*>(.*?)</a>', html, re.S):
+            try:
+                href = m.group(1)
+                if href in seen:
+                    continue
+                seen.add(href)
+                seg = m.group(2)
+                # 提取标题：优先 h2/h3/h4
+                name = ""
+                nm = re.search(r'<h[234][^>]*>(.*?)</h[234]>', seg, re.S)
+                if nm:
+                    name = re.sub(r"<[^>]+>", "", nm.group(1)).strip()
+                # 尝试 title 属性
+                if not name:
+                    nm = re.search(r'title="([^"]*)"', seg)
+                    if nm:
+                        name = nm.group(1).strip()
+                # 尝试 alt 属性
+                if not name:
+                    nm = re.search(r'alt="([^"]*)"', seg)
+                    if nm:
+                        name = nm.group(1).strip()
+                # 尝试 p 标签或其他文本
+                if not name:
+                    nm = re.search(r'<p[^>]*>(.*?)</p>', seg, re.S)
+                    if nm:
+                        name = re.sub(r"<[^>]+>", "", nm.group(1)).strip()
+                # 最后尝试取所有纯文本
+                if not name:
+                    txt = re.sub(r"<[^>]+>", " ", seg)
+                    name = re.sub(r"\s+", " ", txt).strip()[:100]
+                if not name:
+                    name = "黑料 " + href.rsplit("/", 1)[-1]
+                # 提取封面图 - 多种属性
+                pic = ""
+                pm = re.search(r'z-image-loader-url="([^"]*)"', seg)
+                if not pm:
+                    pm = re.search(r'data-src="([^"]*)"', seg)
+                if not pm:
+                    pm = re.search(r'src="([^"]*)"', seg)
+                if pm:
+                    pic = self._pic(pm.group(1))
+                # 提取日期/备注
+                remarks = ""
+                rm = re.search(r'(\d{4}年\d{2}月\d{2}日)', seg)
+                if rm:
+                    remarks = rm.group(1)
+                if not remarks:
+                    rm = re.search(r'<span[^>]*>([^<]+)</span>', seg)
+                    if rm:
+                        remarks = rm.group(1).strip()
+                out.append({"vod_id": self.host + href, "vod_name": name, "vod_pic": pic, "vod_remarks": remarks})
+            except Exception:
+                continue
+        # 备用：如果上面没匹配到，尝试更宽松的匹配
+        if not out:
+            for m in re.finditer(r'href="(/heiliao/post/\d+)"', html):
+                try:
+                    href = m.group(1)
+                    if href in seen:
+                        continue
+                    seen.add(href)
+                    # 从链接周围提取文本作为标题
+                    start = max(0, m.start() - 500)
+                    end = min(len(html), m.end() + 500)
+                    context = html[start:end]
+                    # 尝试在上下文中找标题
+                    nm = re.search(r'<h[234][^>]*>(.*?)</h[234]>', context, re.S)
+                    if nm:
+                        name = re.sub(r"<[^>]+>", "", nm.group(1)).strip()
+                    else:
+                        nm = re.search(r'title="([^"]*)"', context)
+                        name = nm.group(1).strip() if nm else "黑料 " + href.rsplit("/", 1)[-1]
+                    # 找图片
+                    pm = re.search(r'(?:src|data-src|z-image-loader-url)="([^"]*)"', context)
+                    pic = self._pic(pm.group(1)) if pm else ""
+                    # 找日期
+                    rm = re.search(r'(\d{4}年\d{2}月\d{2}日)', context)
+                    remarks = rm.group(1) if rm else ""
+                    out.append({"vod_id": self.host + href, "vod_name": name, "vod_pic": pic, "vod_remarks": remarks})
+                except Exception:
+                    continue
+        return out
     def homeContent(self, filter):
         fl = dict(self.filters)
         for t, n in self.themes:
@@ -323,6 +411,17 @@ class Spider(Spider):
             if items and pc <= pg:
                 pc = pg + 1
             return {"page": pg, "pagecount": pc, "limit": len(items) or 24, "total": 0, "list": items}
+        # 黑料吃瓜：/heiliao/{pg}/
+        if tid == "/heiliao":
+            url = self.host + "/heiliao/"
+            if pg > 1:
+                url = self.host + "/heiliao/%d/" % pg
+            ht = self._get(url)
+            items = self._heiliao_list(ht)
+            pc = self._pagecount(ht, pg)
+            if items and pc <= pg:
+                pc = pg + 1
+            return {"page": pg, "pagecount": pc, "limit": len(items) or 20, "total": 0, "list": items}
         # 其他普通分类（如 /new）
         base = self.tids.get(tid, tid)
         if sort in ("hot", "update", "watch", "favorite"):
