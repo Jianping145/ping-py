@@ -271,30 +271,59 @@ class Spider(Spider):
         tid = str(tid)
         ex = self._ext(extend)
         sort = ex.get("sort", "") or ""
+        # 专题详情：/theme/detail/{id}/{sort}/{pg}/
         if tid.startswith("theme$"):
             t = tid.split("$")[1]
             st = sort if sort in ("hot", "update", "watch", "favorite") else "update"
-            ht = self._get(self.host + "/theme/detail/%s/%s/" % (t, st))
+            url = self.host + "/theme/detail/%s/%s/" % (t, st)
+            if pg > 1:
+                url = self.host + "/theme/detail/%s/%s/%d/" % (t, st, pg)
+            ht = self._get(url)
             items = self._list(ht)
-            return {"page": pg, "pagecount": self._pagecount(ht, pg), "limit": len(items) or 24, "total": 0, "list": items}
+            pc = self._pagecount(ht, pg)
+            if items and pc <= pg:
+                pc = pg + 1
+            return {"page": pg, "pagecount": pc, "limit": len(items) or 24, "total": 0, "list": items}
+        # 女优详情：/actress/detail/{id}/{sort}/{pg}/
         if tid.startswith("actress$"):
             aid = tid.split("$")[1]
             st = sort if sort in ("hot", "latest", "watch", "favorite") else "latest"
-            ht = self._get(self.host + "/actress/detail/%s/%s/" % (aid, st))
+            url = self.host + "/actress/detail/%s/%s/" % (aid, st)
+            if pg > 1:
+                url = self.host + "/actress/detail/%s/%s/%d/" % (aid, st, pg)
+            ht = self._get(url)
             items = self._list(ht)
             if "actress$" + aid not in self.filters:
                 self.filters["actress$" + aid] = [{"key": "sort", "name": "排序", "value": [{"n": "近期最佳", "v": "hot"}, {"n": "今日更新", "v": "latest"}, {"n": "最多观看", "v": "watch"}, {"n": "最高收藏", "v": "favorite"}]}]
-            return {"page": pg, "pagecount": self._pagecount(ht, pg), "limit": len(items) or 24, "total": 0, "list": items}
+            pc = self._pagecount(ht, pg)
+            if items and pc <= pg:
+                pc = pg + 1
+            return {"page": pg, "pagecount": pc, "limit": len(items) or 24, "total": 0, "list": items}
+        # 专题合集列表：/theme/{sort}/{pg}/
         if tid == "/theme":
             st = sort if sort in ("sort", "check_num", "count") else "sort"
-            ht = self._get(self.host + "/theme/%s" % st)
+            url = self.host + "/theme/%s/" % st
+            if pg > 1:
+                url = self.host + "/theme/%s/%d/" % (st, pg)
+            ht = self._get(url)
             items = self._theme_list(ht)
-            return {"page": pg, "pagecount": pg, "limit": len(items) or 12, "total": len(items), "list": items}
+            pc = self._pagecount(ht, pg)
+            if items and pc <= pg:
+                pc = pg + 1
+            return {"page": pg, "pagecount": pc, "limit": len(items) or 12, "total": 0, "list": items}
+        # 热门女优列表：/actress/{sort}/{pg}/
         if tid == "/actress/hot":
             st = sort if sort in ("hot", "count") else "hot"
-            ht = self._get(self.host + "/actress/%s/" % st)
+            url = self.host + "/actress/%s/" % st
+            if pg > 1:
+                url = self.host + "/actress/%s/%d/" % (st, pg)
+            ht = self._get(url)
             items = self._actress_list(ht)
-            return {"page": pg, "pagecount": self._pagecount(ht, pg) or 1, "limit": len(items) or 24, "total": 0, "list": items}
+            pc = self._pagecount(ht, pg)
+            if items and pc <= pg:
+                pc = pg + 1
+            return {"page": pg, "pagecount": pc, "limit": len(items) or 24, "total": 0, "list": items}
+        # 其他普通分类（如 /new）
         base = self.tids.get(tid, tid)
         if sort in ("hot", "update", "watch", "favorite"):
             base = re.sub(r"/(?:hot|update|watch|favorite)$", "/" + sort, base)
