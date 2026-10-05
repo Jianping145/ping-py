@@ -77,50 +77,54 @@ class Spider(Spider):
 
     def detailContent(self, ids):
         vod_id = str(ids[0]).strip()
-        # 兼容已是完整 path 的情况
-        if vod_id.startswith("http") or "/vod/" in vod_id:
-            if vod_id.startswith("http"):
-                url = vod_id
-            else:
-                url = self.host + (vod_id if vod_id.startswith("/") else "/" + vod_id)
-            m = re.search(r"/id/(\d+)", vod_id)
-            if m:
-                vod_id = m.group(1)
-        else:
-            url = f"{self.host}{self.base}/vod/play/id/{vod_id}/sid/1/nid/1.html"
+        m = re.search(r"/id/(\d+)", vod_id)
+        if m:
+            vod_id = m.group(1)
 
-        html = self._get(url)
-        play_info = self._extract_player_data(html)
-        if not play_info and "/vod/detail/" not in url:
-            # 再试详情页
-            detail_url = f"{self.host}{self.base}/vod/detail/id/{vod_id}.html"
-            html2 = self._get(detail_url)
-            play_info = self._extract_player_data(html2) or play_info
-            if html2:
-                html = html2
+        detail_url = f"{self.host}{self.base}/vod/detail/id/{vod_id}.html"
+        play_url = f"{self.host}{self.base}/vod/play/id/{vod_id}/sid/1/nid/1.html"
 
-        title = (play_info or {}).get("title") or self._pick_title(html) or vod_id
-        cover = (play_info or {}).get("cover") or self._pick_cover(html) or ""
-        play_url = (play_info or {}).get("url") or ""
+        # 先详情拿标题封面，再播放页拿真实流（苹果CMS 常见）
+        detail_html = self._get(detail_url)
+        play_html = self._get(play_url)
+        html = play_html or detail_html
 
-        # 多线路：从页面里扫全部 m3u8 / mp4
-        sources = []
-        if play_url:
-            sources.append(("直链", play_url))
-        for m in re.finditer(
-            r'(https?://[^"\'\s<>\\]+?\.(?:m3u8|mp4)[^"\'\s<>\\]*)',
-            html or "",
-            re.I,
-        ):
-            u = m.group(1).replace("\\/", "/")
-            if not any(u == s[1] for s in sources):
-                sources.append(("线路%d" % (len(sources) + 1), u))
+        play_info = self._extract_player_data(play_html) or self._extract_player_data(detail_html)
+        title = (play_info or {}).get("title") or self._pick_title(detail_html) or self._pick_title(play_html) or vod_id
+        cover = (play_info or {}).get("cover") or self._pick_cover(detail_html) or self._pick_cover(play_html) or ""
 
-        if not sources:
-            return {"list": []}
+        # 从详情页扫多集/多线路（sid/nid）
+        episodes = self._parse_play_list(detail_html, vod_id)
+        direct = (play_info or {}).get("url") or ""
+        if direct and not episodes:
+            episodes = [("正片", direct)]
 
-        play_from = "$$$".join(name for name, _ in sources)
-        play_urls = "$$$".join("正片$%s" % u for _, u in sources)
+        # 页面里直接暴露的 m3u8/mp4
+        if not episodes:
+            for m3 in re.finditer(
+                r'(https?://[^"\'\s<>\\]+?\.(?:m3u8|mp4)(?:\?[^"\'\s<>\\]*)?)',
+                html or "",
+                re.I,
+            ):
+                u = m3.group(1).replace("\\/", "/")
+                episodes.append(("正片", u))
+                break
+
+        # 仍没有直链：把播放页交给 playerContent 再解析（更稳）
+        if not episodes:
+            episodes = [("正片", play_url)]
+
+        # 去重保序
+        seen = set()
+        uniq = []
+        for name, u in episodes:
+            if u in seen:
+                continue
+            seen.add(u)
+            uniq.append((name, u))
+
+        play_from = "直链"
+        play_urls = "#".join("%s$%s" % (n, u) for n, u in uniq)
 
         return {
             "list": [
@@ -137,35 +141,48 @@ class Spider(Spider):
         }
 
     def playerContent(self, flag, id, vipFlags):
-        url = id
-        # 若传入的是站内 play 页，再解析一次
-        if url and ("/vod/play/" in url or not self.isVideoFormat(url)):
-            if not url.startswith("http"):
-                url = self.host + (url if url.startswith("/") else self.base + "/" + url)
+        url = (id or "").strip()
+        headers = {
+            "User-Agent": self.header["User-Agent"],
+            "Referer": self.host + "/",
+            "Origin": self.host,
+            "Accept": "*/*",
+        }
+
+        # 已是媒体地址
+        if self.isVideoFormat(url):
+            return {"parse": 0, "jx": 0, "url": url, "header": headers}
+
+        # 数字 id → 拼播放页
+        if re.fullmatch(r"\d+", url):
+            url = f"{self.host}{self.base}/vod/play/id/{url}/sid/1/nid/1.html"
+
+        # 相对路径
+        if url.startswith("/"):
+            url = self.host + url
+        elif url and not url.startswith("http"):
+            url = f"{self.host}{self.base}/vod/play/id/{url}/sid/1/nid/1.html"
+
+        # 拉播放页解析真实地址
+        if "/vod/play/" in url or "/vod/detail/" in url:
             html = self._get(url)
             info = self._extract_player_data(html)
-            if info and info.get("url"):
-                url = info["url"]
-            else:
+            real = (info or {}).get("url") or ""
+            if not real:
                 m = re.search(
-                    r'(https?://[^"\'\s<>\\]+?\.(?:m3u8|mp4)[^"\'\s<>\\]*)',
+                    r'(https?://[^"\'\s<>\\]+?\.(?:m3u8|mp4)(?:\?[^"\'\s<>\\]*)?)',
                     html or "",
                     re.I,
                 )
                 if m:
-                    url = m.group(1).replace("\\/", "/")
+                    real = m.group(1).replace("\\/", "/")
+            if real:
+                # 部分 CDN 要带播放页 Referer
+                headers["Referer"] = url if url.startswith("http") else self.host + "/"
+                return {"parse": 0, "jx": 0, "url": real, "header": headers}
 
-        return {
-            "parse": 0,
-            "url": url,
-            "header": json.dumps(
-                {
-                    "User-Agent": self.header["User-Agent"],
-                    "Referer": self.host + "/",
-                },
-                ensure_ascii=False,
-            ),
-        }
+        # 兜底：交给壳解析
+        return {"parse": 1, "jx": 0, "url": url, "header": headers}
 
     def searchContent(self, key, quick, pg="1"):
         return self.searchContentPage(key, quick, pg)
@@ -310,44 +327,78 @@ class Spider(Spider):
             "vod_remarks": remarks,
         }
 
+    def _decode_play_url(self, url, encrypt=0):
+        """苹果CMS encrypt: 0明文 1escape 2base64"""
+        if not url:
+            return ""
+        url = str(url).strip().replace("\\/", "/")
+        try:
+            enc = int(encrypt) if encrypt is not None else 0
+        except Exception:
+            enc = 0
+        try:
+            if enc == 1:
+                from urllib.parse import unquote
+                url = unquote(url)
+            elif enc == 2:
+                import base64
+                url = base64.b64decode(url).decode("utf-8", "ignore")
+        except Exception:
+            pass
+        return url.replace("\\/", "/")
+
     def _extract_player_data(self, html):
         result = {}
         if not html:
             return result
 
-        # player_data / player_aaaa / player_xx 常见写法
-        patterns = [
-            r'player_aaaa\s*=\s*(\{.+?\})\s*;',
-            r'player_data\s*=\s*(\{.+?\})\s*;',
-            r'var\s+player_[a-zA-Z0-9]+\s*=\s*(\{.+?\})\s*;',
-        ]
-        raw = None
-        for p in patterns:
-            m = re.search(p, html, re.S)
-            if m:
-                raw = m.group(1)
-                break
+        # 优先从 url / encrypt 字段硬抽（避免 JSON 嵌套截断）
+        um = re.search(r'"url"\s*:\s*"((?:\\.|[^"\\])*)"', html)
+        em = re.search(r'"encrypt"\s*:\s*(\d+)', html)
+        if um:
+            raw_url = um.group(1).encode("utf-8").decode("unicode_escape") if "\\u" in um.group(1) else um.group(1)
+            raw_url = raw_url.replace("\\/", "/")
+            enc = em.group(1) if em else 0
+            decoded = self._decode_play_url(raw_url, enc)
+            if decoded:
+                result["url"] = decoded
 
-        if raw:
-            # 处理转义与截断
-            try:
-                raw_fix = raw.replace("\\/", "/")
-                # 若正则因嵌套截断，尽量补全到最后一个 }
-                data = json.loads(raw_fix)
-            except Exception:
+        # 完整 player_aaaa JSON
+        if not result.get("url"):
+            patterns = [
+                r'player_aaaa\s*=\s*(\{[\s\S]*?\})\s*;',
+                r'player_data\s*=\s*(\{[\s\S]*?\})\s*;',
+                r'var\s+player_[a-zA-Z0-9]+\s*=\s*(\{[\s\S]*?\})\s*;',
+            ]
+            for p in patterns:
+                m = re.search(p, html)
+                if not m:
+                    continue
+                raw = m.group(1)
+                data = None
                 try:
-                    # 非贪婪失败时，从 url 字段硬抽
-                    um = re.search(r'"url"\s*:\s*"([^"]+)"', raw)
-                    data = {"url": um.group(1).replace("\\/", "/")} if um else {}
+                    data = json.loads(raw.replace("\\/", "/"))
                 except Exception:
-                    data = {}
-            url = (data.get("url") or data.get("link") or "").replace("\\/", "/")
-            if url:
-                result["url"] = url
+                    um2 = re.search(r'"url"\s*:\s*"((?:\\.|[^"\\])*)"', raw)
+                    em2 = re.search(r'"encrypt"\s*:\s*(\d+)', raw)
+                    if um2:
+                        data = {
+                            "url": um2.group(1).replace("\\/", "/"),
+                            "encrypt": em2.group(1) if em2 else 0,
+                        }
+                if not data:
+                    continue
+                url = self._decode_play_url(
+                    data.get("url") or data.get("link") or "",
+                    data.get("encrypt", 0),
+                )
+                if url:
+                    result["url"] = url
+                    break
 
         if not result.get("url"):
             m = re.search(
-                r'"url"\s*:\s*"(https?://[^"]+\.(?:m3u8|mp4)[^"]*)"',
+                r'(https?://[^"\'\s<>\\]+?\.(?:m3u8|mp4)(?:\?[^"\'\s<>\\]*)?)',
                 html,
                 re.I,
             )
@@ -361,6 +412,30 @@ class Spider(Spider):
         if cover:
             result["cover"] = cover
         return result
+
+    def _parse_play_list(self, html, vod_id):
+        """从详情页解析播放列表 sid/nid"""
+        episodes = []
+        if not html:
+            return episodes
+        # /vod/play/id/{id}/sid/{sid}/nid/{nid}.html
+        for m in re.finditer(
+            rf'href="((?:[^"]*)/vod/play/id/{re.escape(str(vod_id))}/sid/(\d+)/nid/(\d+)[^"]*)"',
+            html,
+        ):
+            href, sid, nid = m.group(1), m.group(2), m.group(3)
+            if not href.startswith("http"):
+                href = self.host + (href if href.startswith("/") else "/" + href)
+            name = "第%s集" % nid
+            # 邻近文本作集名
+            start = max(0, m.start() - 20)
+            end = min(len(html), m.end() + 80)
+            chunk = re.sub(r"<[^>]+>", " ", html[start:end])
+            tm = re.search(r"(第?\d+[集期话]|正片|高清|HD|全集)", chunk)
+            if tm:
+                name = tm.group(1)
+            episodes.append((name, href))
+        return episodes
 
     def _pick_title(self, html):
         if not html:
