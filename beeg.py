@@ -496,6 +496,30 @@ class Spider(BaseSpider):
 
             return None
 
+    def _api_text(self, url, extra_headers=None):
+
+        h = {'User-Agent': self.UA}
+
+        if extra_headers: h.update(extra_headers)
+
+        try:
+
+            r = self.session.get(url, headers=h, timeout=15, verify=False)
+
+            if r.status_code != 200:
+
+                self._log(f'API text 状态码 {r.status_code}: {url}')
+
+                return None
+
+            return r.text.strip()
+
+        except Exception as e:
+
+            self._log(f'API text 请求失败: {url} - {e}')
+
+            return None
+
     @staticmethod
 
     def _fmt_dur(seconds):
@@ -642,55 +666,97 @@ class Spider(BaseSpider):
 
         vid = str(ids[0] if isinstance(ids, list) else ids)
 
-        data = self._api(f'{self.API_BASE}/facts/file/{vid}', {
+        extra = {
 
             'Origin': 'https://beeg.com',
 
             'Referer': 'https://beeg.com/'
 
-        })
+        }
 
-        if not data:
+        # 新接口：play_url 返回 m3u8 相对路径（不再依赖 hls_resources）
 
-            return {'list': []}
-
-        file = data.get('file', {})
-
-        hls = file.get('hls_resources', {}) or {}
+        play_path = self._api_text(f'{self.API_BASE}/video/play_url/{vid}', extra)
 
         qualities = []
 
-        multi = hls.get('fl_cdn_multi')
+        if play_path and not play_path.startswith('{') and 'm3u8' in play_path:
 
-        if multi:
+            multi_url = play_path if play_path.startswith('http') else f'https://video.beeg.com/{play_path}'
 
-            if not multi.startswith('http'):
+            qualities.append(('自动', multi_url, 99999))
 
-                multi = f'https://video.beeg.com/{multi}'
+        # 回退：旧 hls_resources（兼容旧视频）
 
-            qualities.append(('自动(1080p)', multi, 99999))
+        if not qualities:
 
-        for key, value in hls.items():
+            data = self._api(f'{self.API_BASE}/facts/file/{vid}', extra)
 
-            if value and key.startswith('fl_cdn_') and key != 'fl_cdn_multi':
+            if data:
 
-                m = re.match(r'fl_cdn_(\d+)', key)
+                file = data.get('file', {})
 
-                height = int(m.group(1)) if m else 0
+                hls = file.get('hls_resources', {}) or {}
 
-                url = value if value.startswith('http') else f'https://video.beeg.com/{value}'
+                multi = hls.get('fl_cdn_multi')
 
-                qualities.append((f'{height}p', url, height))
+                if multi:
+
+                    if not multi.startswith('http'):
+
+                        multi = f'https://video.beeg.com/{multi}'
+
+                    qualities.append(('自动', multi, 99999))
+
+                for key, value in hls.items():
+
+                    if value and key.startswith('fl_cdn_') and key != 'fl_cdn_multi':
+
+                        mm = re.match(r'fl_cdn_(\d+)', key)
+
+                        height = int(mm.group(1)) if mm else 0
+
+                        url = value if value.startswith('http') else f'https://video.beeg.com/{value}'
+
+                        qualities.append((f'{height}p', url, height))
+
+        if not qualities:
+
+            self._log(f'detailContent 无法获取播放地址: vid={vid}')
+
+            return {'list': []}
 
         qualities.sort(key=lambda x: x[2], reverse=True)
 
-        play_urls = '#'.join([f'{name}${url}' for name, url, _ in qualities]) or f'默认${vid}'
+        play_urls = '#'.join([f'{name}${url}' for name, url, _ in qualities])
+
+        # 标题从 facts 取（可选）
+
+        title = 'Video'
+
+        data = self._api(f'{self.API_BASE}/facts/file/{vid}', extra)
+
+        if data:
+
+            file = data.get('file', {})
+
+            for item in (file.get('data') or []):
+
+                if item.get('cd_column') == 'sf_name':
+
+                    title = item.get('cd_value') or title
+
+                    break
+
+            if file.get('fl_name'):
+
+                title = file.get('fl_name')
 
         vod = {
 
             'vod_id': vid,
 
-            'vod_name': file.get('fl_name', 'Video'),
+            'vod_name': title,
 
             'vod_pic': '',
 
