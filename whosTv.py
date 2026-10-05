@@ -92,7 +92,57 @@ class Spider(Spider):
                     "vod_remarks": count_text if count_text else "作品集",
                     "vod_tag": "folder"
                 })
-        # 影片网格页 / 帧分类页（包括女优个人页的作品列表）
+        # 女优个人页作品列表：结构为 a[href=/videos/xxx] + data-cover-src + h3
+        elif tid.startswith("/actresses/"):
+            seen = set()
+            for a in soup.find_all("a", href=True):
+                href = a.get("href") or ""
+                if "/videos/" not in href:
+                    continue
+                if href.startswith("http"):
+                    href = href.replace(self.host, "")
+                if not href.startswith("/"):
+                    href = "/" + href
+                href = href.split("?")[0].split("#")[0]
+                if href in seen or href.rstrip("/").endswith("/videos"):
+                    continue
+                slug = href.split("/")[-1]
+                if not slug or slug.startswith("page-"):
+                    continue
+                h3 = a.find("h3")
+                v_name = h3.get_text(strip=True) if h3 else slug.upper()
+                real_pic = ""
+                div_cover = a.find("div", attrs={"data-cover-src": True})
+                if div_cover:
+                    real_pic = self._decode_cover(div_cover.get("data-cover-src"))
+                if not real_pic:
+                    img = a.find("img")
+                    if img:
+                        real_pic = img.get("src") or img.get("data-src") or ""
+                seen.add(href)
+                videos.append({
+                    "vod_id": href,
+                    "vod_name": v_name,
+                    "vod_pic": real_pic,
+                    "vod_remarks": slug
+                })
+            # 兜底：从原文抽 /videos/slug
+            if not videos:
+                for m in re.finditer(r'/videos/([A-Za-z0-9][A-Za-z0-9\-_]{1,80})', rsp.text):
+                    slug = m.group(1)
+                    if slug.startswith("page-"):
+                        continue
+                    href = "/videos/" + slug.lower()
+                    if href in seen:
+                        continue
+                    seen.add(href)
+                    videos.append({
+                        "vod_id": href,
+                        "vod_name": slug.upper(),
+                        "vod_pic": "",
+                        "vod_remarks": slug
+                    })
+        # 影片网格页 / 帧分类页
         else:
             items = soup.find_all('a', href=re.compile(r'(?:^|/)(videos|frames)/[^"\s]+'))
             for item in items:
@@ -166,7 +216,8 @@ class Spider(Spider):
                         if len(parts) > 1:
                             remarks = parts[-1]
                     else:
-                        code = remarks or self.regStr(v_name, r'([A-Za-z0-9][A-Za-z0-9\-_]{2,})')
+                        mcode = re.search(r'([A-Za-z0-9][A-Za-z0-9\-_]{2,80})', v_name)
+                        code = remarks or (mcode.group(1) if mcode else "")
                     if code:
                         # 去掉可能的多余空格，统一小写路径
                         code = re.sub(r'\s+', '', code)
