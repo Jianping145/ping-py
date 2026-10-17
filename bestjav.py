@@ -160,6 +160,37 @@ def aes_cbc_decrypt(ct, key, iv):
     return out
 
 
+def evp_kdf(password, salt, key_len=32, iv_len=16):
+    """CryptoJS OpenSSL EVP_BytesToKey (MD5)"""
+    dtot = b""
+    d = b""
+    pw = password.encode("utf-8") if isinstance(password, str) else password
+    while len(dtot) < key_len + iv_len:
+        d = hashlib.md5(d + pw + salt).digest()
+        dtot += d
+    return dtot[:key_len], dtot[key_len:key_len + iv_len]
+
+
+def cryptojs_aes_decrypt(pox, dp_b64):
+    """解密 videplay.us/ps 页 pox + dp → m3u8 URL"""
+    try:
+        data = json.loads(base64.b64decode(dp_b64).decode("utf-8"))
+        ct = base64.b64decode(data["ct"].replace("\\/", "/"))
+        iv = bytes.fromhex(data["iv"])
+        salt = bytes.fromhex(data["s"])
+        parts = pox.split("+")
+        if len(parts) < 2:
+            return ""
+        # 与站点一致：取 + 后第二段并去掉首字符
+        key_str = parts[1][1:] if len(parts[1]) > 1 else parts[1]
+        key, _ = evp_kdf(key_str, salt, 32, 16)
+        pt = aes_cbc_decrypt(ct, key, iv)
+        text = pt.decode("utf-8", errors="ignore").strip().strip('"').replace("\\/", "/")
+        return text
+    except Exception:
+        return ""
+
+
 def hsdf_decode(encoded, radix, xor_k):
     """站点 hsdfdg252：按 radix+97 字符分割，parseInt(radix) 再异或。"""
     split_ch = chr(int(radix) + 97)
@@ -517,12 +548,30 @@ class Spider(SpiderBase):
         if not html:
             return ""
         ms = re.findall(r'https?://[^\s"\']+\.m3u8[^\s"\']*', html)
-        # 选非预览、优先高清序号
         for u in ms:
             if "preview" in u.lower():
                 continue
             return u
         return ms[0] if ms else ""
+
+    def _decrypt_ps_m3u8(self, vid, referer=""):
+        """videplay.us/ps/{id} → pox/dp AES → api.videplay.us 代理 m3u8（可播）"""
+        if not vid:
+            return ""
+        ps_url = "https://videplay.us/ps/" + vid
+        res = self._fetch(ps_url, referer=referer or "https://api.videplay.us/")
+        html = res.get("text", "")
+        if not html:
+            return ""
+        pox_m = re.search(r"(?:let|var)\s+pox\s*=\s*['\"]([^'\"]+)['\"]", html)
+        dp_m = re.search(r"(?:let|var)\s+dp\s*=\s*['\"]([^'\"]+)['\"]", html)
+        if not pox_m or not dp_m:
+            return ""
+        stream = cryptojs_aes_decrypt(pox_m.group(1), dp_m.group(1))
+        if stream and ("m3u8" in stream or stream.startswith("http")):
+            self.log("ps m3u8 ok")
+            return stream.strip()
+        return ""
 
     def _resolve_stream(self, page_url, html=None):
         if not html:
@@ -540,12 +589,25 @@ class Spider(SpiderBase):
         if not emb_html:
             return ""
 
+        # 1) 解密 SP 得到 play.php?id=VID
         play_url = self._decrypt_mvarr_sp(emb_html)
-        if not play_url:
-            return ""
+        vid = ""
+        if play_url and "id=" in play_url:
+            vid = play_url.split("id=")[-1].strip()
 
-        m3u8 = self._m3u8_from_player(play_url, embed)
-        return m3u8 or play_url
+        # 2) 优先：videplay.us/ps 解密出的 api.videplay.us 代理 m3u8（用户可播）
+        if vid:
+            stream = self._decrypt_ps_m3u8(vid, referer=embed)
+            if stream:
+                return stream
+
+        # 3) 退回 play.php 页内 m3u8
+        if play_url:
+            m3u8 = self._m3u8_from_player(play_url, embed)
+            if m3u8:
+                return m3u8
+            return play_url
+        return ""
 
     def detailContent(self, ids):
         raw_id = ids[0] if isinstance(ids, (list, tuple)) else str(ids)
@@ -583,10 +645,15 @@ class Spider(SpiderBase):
 
         headers = {
             "User-Agent": self._ua,
-            "Referer": "https://7tv082.com/",
-            "Origin": "https://7tv082.com",
+            "Referer": "https://videplay.us/",
+            "Origin": "https://videplay.us",
             "Accept": "*/*",
         }
+        if stream_url and "api.videplay.us" in stream_url:
+            headers["Referer"] = "https://videplay.us/"
+            headers["Origin"] = "https://videplay.us"
+        elif stream_url and "7tv082" in stream_url:
+            headers["Referer"] = "https://7tv082.com/"
         if stream_url and self.isVideoFormat(stream_url):
             return {
                 "parse": 0,
