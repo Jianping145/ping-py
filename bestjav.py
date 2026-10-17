@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # BestJavPorn spider - bestjavporn.me
-# 2026-10: 播放源改为 api.videplay.us 多线路，旧 /xx/ + AES 已失效
-# 解析：rocket base64 取 embed → 二进制 ID / packer m3u8 → 失败则 parse=1 嗅探
+# 播放：api.videplay.us → hsdfdg252 解码 → AES-CBC → play.php → m3u8
 
 import re
 import json
@@ -20,9 +19,161 @@ try:
     from base.spider import Spider as SpiderBase
 except ImportError:
     class SpiderBase(object):
-        def getCache(self, key): return None
-        def setCache(self, key, value): return "fail"
-        def delCache(self, key): return "fail"
+        pass
+
+
+# ---------- AES-256/128 CBC (CryptoJS compatible) ----------
+Sbox = (
+    0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+    0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+    0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+    0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+    0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+    0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+    0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+    0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+    0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+    0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+    0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+    0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+    0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+    0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+    0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+    0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16,
+)
+Rcon = (0x00,0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1b,0x36)
+
+
+def _xtime(a):
+    return (((a << 1) ^ 0x1B) & 0xFF) if (a & 0x80) else ((a << 1) & 0xFF)
+
+
+def _sub(s):
+    return [Sbox[b] for b in s]
+
+
+def _shift(s):
+    return [s[0], s[5], s[10], s[15], s[4], s[9], s[14], s[3],
+            s[8], s[13], s[2], s[7], s[12], s[1], s[6], s[11]]
+
+
+def _mix(s):
+    out = []
+    for i in range(4):
+        t = s[4 * i:4 * i + 4]
+        out += [
+            _xtime(t[0]) ^ _xtime(t[1]) ^ t[1] ^ t[2] ^ t[3],
+            t[0] ^ _xtime(t[1]) ^ _xtime(t[2]) ^ t[2] ^ t[3],
+            t[0] ^ t[1] ^ _xtime(t[2]) ^ _xtime(t[3]) ^ t[3],
+            _xtime(t[0]) ^ t[0] ^ t[1] ^ t[2] ^ _xtime(t[3]),
+        ]
+    return out
+
+
+def _add(s, k):
+    return [s[i] ^ k[i] for i in range(16)]
+
+
+def _key_expand(key):
+    nk = len(key) // 4
+    nr = {4: 10, 6: 12, 8: 14}[nk]
+    w = list(key)
+    i = nk
+    while len(w) < 16 * (nr + 1):
+        t = w[-4:]
+        if i % nk == 0:
+            t = _sub(t[1:] + t[:1])
+            t[0] ^= Rcon[i // nk]
+        elif nk > 6 and i % nk == 4:
+            t = _sub(t)
+        for j in range(4):
+            w.append(w[-nk * 4] ^ t[j])
+        i += 1
+    return [w[i:i + 16] for i in range(0, 16 * (nr + 1), 16)], nr
+
+
+def _inv_sub(s):
+    inv = [0] * 256
+    for i, v in enumerate(Sbox):
+        inv[v] = i
+    return [inv[b] for b in s]
+
+
+def _inv_shift(s):
+    return [s[0], s[13], s[10], s[7], s[4], s[1], s[14], s[11],
+            s[8], s[5], s[2], s[15], s[12], s[9], s[6], s[3]]
+
+
+def _inv_mix(s):
+    out = []
+
+    def m(a, n):
+        r = 0
+        for _ in range(8):
+            if n & 1:
+                r ^= a
+            hi = a & 0x80
+            a = (a << 1) & 0xFF
+            if hi:
+                a ^= 0x1B
+            n >>= 1
+        return r
+
+    for i in range(4):
+        t = s[4 * i:4 * i + 4]
+        out += [
+            m(t[0], 14) ^ m(t[1], 11) ^ m(t[2], 13) ^ m(t[3], 9),
+            m(t[0], 9) ^ m(t[1], 14) ^ m(t[2], 11) ^ m(t[3], 13),
+            m(t[0], 13) ^ m(t[1], 9) ^ m(t[2], 14) ^ m(t[3], 11),
+            m(t[0], 11) ^ m(t[1], 13) ^ m(t[2], 9) ^ m(t[3], 14),
+        ]
+    return out
+
+
+def aes_decrypt_block(block, round_keys, nr):
+    s = _add(list(block), round_keys[nr])
+    for r in range(nr - 1, 0, -1):
+        s = _inv_shift(s)
+        s = _inv_sub(s)
+        s = _add(s, round_keys[r])
+        s = _inv_mix(s)
+    s = _inv_shift(s)
+    s = _inv_sub(s)
+    s = _add(s, round_keys[0])
+    return bytes(s)
+
+
+def aes_cbc_decrypt(ct, key, iv):
+    round_keys, nr = _key_expand(list(key))
+    out = b""
+    prev = iv
+    for i in range(0, len(ct), 16):
+        block = ct[i:i + 16]
+        if len(block) < 16:
+            break
+        dec = aes_decrypt_block(block, round_keys, nr)
+        out += bytes(dec[j] ^ prev[j] for j in range(16))
+        prev = block
+    pad = out[-1] if out else 0
+    if 1 <= pad <= 16:
+        out = out[:-pad]
+    return out
+
+
+def hsdf_decode(encoded, radix, xor_k):
+    """站点 hsdfdg252：按 radix+97 字符分割，parseInt(radix) 再异或。"""
+    split_ch = chr(int(radix) + 97)
+    parts = encoded.split(split_ch)
+    out = []
+    for p in parts:
+        if not p:
+            continue
+        try:
+            v = int(p, int(radix)) ^ int(xor_k)
+        except Exception:
+            continue
+        out.append(chr(v & 0xFF))
+    return "".join(out)
 
 
 def format_remarks(brand="BestJAV", meta=""):
@@ -30,48 +181,6 @@ def format_remarks(brand="BestJAV", meta=""):
     if clean_meta:
         return "%s | %s" % (brand, clean_meta)
     return brand
-
-
-def bin_decode_01(b):
-    """把 01 二进制串解码成 ASCII id"""
-    out = []
-    for i in range(0, len(b) // 8 * 8, 8):
-        out.append(chr(int(b[i:i + 8], 2)))
-    return "".join(out)
-
-
-def unpack_packer(html):
-    """Dean Edwards packer → 明文"""
-    m = re.search(
-        r"return p\}\('([\s\S]*?)',(\d+),(\d+),'([\s\S]*?)'\.split\('\|'\)\)",
-        html,
-    )
-    if not m:
-        return ""
-    payload, radix, count, keys_s = (
-        m.group(1),
-        int(m.group(2)),
-        int(m.group(3)),
-        m.group(4),
-    )
-    keys = keys_s.split("|")
-    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
-
-    def to_base(n, b):
-        if n == 0:
-            return "0"
-        s = ""
-        while n:
-            s = digits[n % b] + s
-            n //= b
-        return s
-
-    p, c = payload, count
-    while c:
-        c -= 1
-        if c < len(keys) and keys[c]:
-            p = re.sub(r"\b" + re.escape(to_base(c, radix)) + r"\b", keys[c], p)
-    return p
 
 
 class Spider(SpiderBase):
@@ -91,20 +200,6 @@ class Spider(SpiderBase):
             urllib.request.HTTPCookieProcessor(self.cj),
             urllib.request.HTTPSHandler(context=self.ctx),
         )
-        # 第三方主机候选
-        self.stream_hosts = [
-            "https://mmsi02.com/e/",
-            "https://mmvh02.com/v/",
-            "https://mmvh02.com/e/",
-            "https://vidhidefast.com/e/",
-            "https://vidhidepre.com/e/",
-            "https://morencius.com/embed/",
-            "https://ahvsh.com/e/",
-            "https://streamhide.com/e/",
-            "https://filemoon.to/e/",
-            "https://playmogo.com/e/",
-            "https://dood.re/e/",
-        ]
 
     def init(self, extend=""):
         if isinstance(extend, dict):
@@ -226,9 +321,7 @@ class Spider(SpiderBase):
         if not img_url.startswith("http"):
             img_url = urljoin(self.siteUrl, img_url)
         return "%s@Referer=%s@User-Agent=%s" % (
-            img_url,
-            self.siteUrl + "/",
-            quote(self._ua),
+            img_url, self.siteUrl + "/", quote(self._ua),
         )
 
     def categoryContent(self, tid, pg, filter, extend):
@@ -267,8 +360,7 @@ class Spider(SpiderBase):
         scoped = re.sub(r"<nav[\s\S]*?</nav>", "", scoped, flags=re.I)
         articles = re.findall(
             r'(<article[^>]*class="[^"]*loop-video[^"]*"[^>]*>[\s\S]*?</article>)',
-            scoped,
-            re.I,
+            scoped, re.I,
         )
         if not articles:
             parts = scoped.split("thumb-block")
@@ -278,8 +370,7 @@ class Spider(SpiderBase):
         for chunk in articles:
             link_m = re.search(
                 r'<a[^>]+href=["\']([^"\']+)["\'][^>]*title=["\']([^"\']*)["\']',
-                chunk,
-                re.I,
+                chunk, re.I,
             )
             if not link_m:
                 link_m = re.search(r'<a[^>]+href=["\']([^"\']+)["\']', chunk, re.I)
@@ -288,8 +379,7 @@ class Spider(SpiderBase):
             href = link_m.group(1).strip()
             title = (
                 self._clean_text(link_m.group(2))
-                if link_m.lastindex and link_m.lastindex >= 2
-                else ""
+                if link_m.lastindex and link_m.lastindex >= 2 else ""
             )
             if not title:
                 t2 = re.search(
@@ -307,8 +397,7 @@ class Spider(SpiderBase):
             if not dur_m:
                 dur_m = re.search(
                     r"duration[^>]*>[\s\S]*?([0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?)",
-                    chunk,
-                    re.I,
+                    chunk, re.I,
                 )
             duration = self._clean_text(dur_m.group(1)) if dur_m else ""
             video_list.append({
@@ -330,7 +419,6 @@ class Spider(SpiderBase):
         }
 
     def _extract_embed_url(self, html):
-        # rocket-lazyload base64 脚本里的 defaultUrl
         for m in re.finditer(
             r"data-rocketlazyloadscript=['\"]data:text/javascript;base64,([A-Za-z0-9+/=]+)['\"]",
             html,
@@ -345,100 +433,119 @@ class Spider(SpiderBase):
                     return u
             except Exception:
                 pass
-        # 明文
         m2 = re.search(
             r'(https?://(?:api\.)?videplay\.[a-z]+/embed/[^"\'\s]+)', html, re.I
         )
         if m2:
             return m2.group(1).replace("http://", "https://")
-        m3 = re.search(r'(https?://[^"\']+/xx/[A-Za-z0-9]+)', html)
-        if m3:
-            return m3.group(1).replace("http://", "https://")
         return ""
 
-    def _m3u8_from_html(self, html):
+    def _decrypt_mvarr_sp(self, emb_html):
+        """解密 SP 线路 mvarr['42_1'] → play.php 完整 URL"""
+        try:
+            # 参数每次可能变，从页面取
+            m_xor = re.search(r"hadeedg252\s*=\s*(\d+)", emb_html)
+            m_rad = re.search(r"hcdeedg252\s*=\s*(\d+)", emb_html)
+            m_key = re.search(r"argdeqweqweqwe\s*=\s*'([^']+)'", emb_html)
+            m_iv = re.search(r"hdddedg252\s*=\s*'([^']+)'", emb_html)
+            if not all([m_xor, m_rad, m_key, m_iv]):
+                # 备用变量名
+                m_xor = m_xor or re.search(r"hadeedf252\s*=\s*(\d+)", emb_html)
+                m_rad = m_rad or re.search(r"hcdeedf252\s*=\s*(\d+)", emb_html)
+                m_key = m_key or re.search(r"hdddedd252\s*=\s*'([^']+)'", emb_html)
+                m_iv = m_iv or re.search(r"hdddedf252\s*=\s*'([^']+)'", emb_html)
+            if not all([m_xor, m_rad, m_key, m_iv]):
+                return ""
+
+            xor_k = int(m_xor.group(1))
+            radix = int(m_rad.group(1))
+            key = m_key.group(1).encode("utf-8")
+            iv = m_iv.group(1).encode("utf-8")
+
+            # 优先 42_1 (SP)，再 38_1 / 37_1
+            for key_id in ("42_1", "38_1", "37_1", "28_1"):
+                m = re.search(
+                    r"mvarr\['%s'\]=\[\[[^\]]*?'([0-9a-z]+(?:v[0-9a-z]+)+)'[^\]]*?'((?:https?:)?//[^']+)'"
+                    % key_id,
+                    emb_html,
+                )
+                if not m:
+                    # 更宽松
+                    block = re.search(r"mvarr\['%s'\]=\[\[([^\]]+)" % key_id, emb_html)
+                    if not block:
+                        continue
+                    strs = re.findall(r"'([^']*)'", block.group(1))
+                    if len(strs) < 4:
+                        continue
+                    enc, base = strs[1], strs[3]
+                else:
+                    enc, base = m.group(1), m.group(2)
+
+                if base.startswith("//"):
+                    base = "https:" + base
+
+                cipher_b64 = hsdf_decode(enc, radix, xor_k)
+                if not cipher_b64:
+                    continue
+                try:
+                    ct = base64.b64decode(cipher_b64)
+                except Exception:
+                    continue
+                if len(ct) < 16 or len(key) not in (16, 24, 32):
+                    continue
+                try:
+                    pt = aes_cbc_decrypt(ct, key, iv[:16] if len(iv) >= 16 else iv.ljust(16, b"\0"))
+                    vid = pt.decode("utf-8", errors="ignore").strip()
+                except Exception as e:
+                    self.log("aes %s" % e)
+                    continue
+                if not vid or len(vid) < 8:
+                    continue
+                if base.endswith("id="):
+                    url = base + vid
+                else:
+                    url = base + vid
+                self.log("decrypted %s -> %s" % (key_id, url[:60]))
+                return url
+        except Exception as e:
+            self.log("decrypt %s" % e)
+        return ""
+
+    def _m3u8_from_player(self, play_url, referer):
+        res = self._fetch(play_url, referer=referer)
+        html = res.get("text", "")
         if not html:
             return ""
-        if "eval(function" in html:
-            unpacked = unpack_packer(html)
-            if unpacked:
-                m = re.search(r'https?://[^\s"\']+\.m3u8[^\s"\']*', unpacked)
-                if m:
-                    return m.group(0).replace("\\/", "/")
-                m = re.search(
-                    r'["\']hls2["\']\s*:\s*["\'](https?://[^"\']+)["\']', unpacked
-                )
-                if m:
-                    return m.group(1).replace("\\/", "/")
-        m = re.search(r'https?://[^\s"\']+\.m3u8[^\s"\']*', html)
-        if m and "preview" not in m.group(0).lower():
-            return m.group(0)
-        m = re.search(r'file\s*:\s*["\'](https?://[^"\']+\.m3u8[^"\']*)["\']', html, re.I)
-        if m:
-            return m.group(1)
-        return ""
-
-    def _ids_from_embed(self, emb_html):
-        """从下载链二进制串提取第三方视频 id"""
-        ids = []
-        for b in re.findall(
-            r"(?:streamhide|doodstream)/([01]{40,})\.html", emb_html, re.I
-        ):
-            try:
-                vid = bin_decode_01(b)
-                if vid and vid not in ids:
-                    ids.append(vid)
-            except Exception:
-                pass
-        return ids
-
-    def _resolve_from_hosts(self, vids, referer):
-        for vid in vids:
-            for host in self.stream_hosts:
-                url = host + vid
-                res = self._fetch(url, referer=referer)
-                text = res.get("text", "")
-                if not text or len(text) < 400:
-                    continue
-                m3 = self._m3u8_from_html(text)
-                if m3:
-                    self.log("host hit %s" % host)
-                    return m3
-        return ""
+        ms = re.findall(r'https?://[^\s"\']+\.m3u8[^\s"\']*', html)
+        # 选非预览、优先高清序号
+        for u in ms:
+            if "preview" in u.lower():
+                continue
+            return u
+        return ms[0] if ms else ""
 
     def _resolve_stream(self, page_url, html=None):
         if not html:
             res = self._fetch(page_url)
             html = res.get("text", "")
         if not html:
-            return "", ""
-
-        # 页内直链
-        m3 = self._m3u8_from_html(html)
-        if m3:
-            return m3, ""
+            return ""
 
         embed = self._extract_embed_url(html)
         if not embed:
-            return "", ""
+            return ""
 
         emb = self._fetch(embed, referer=page_url)
         emb_html = emb.get("text", "")
+        if not emb_html:
+            return ""
 
-        # embed 页直链 / packer
-        m3 = self._m3u8_from_html(emb_html)
-        if m3:
-            return m3, embed
+        play_url = self._decrypt_mvarr_sp(emb_html)
+        if not play_url:
+            return ""
 
-        # 二进制 id → 多主机尝试
-        vids = self._ids_from_embed(emb_html)
-        if vids:
-            m3 = self._resolve_from_hosts(vids, embed)
-            if m3:
-                return m3, embed
-
-        # 返回 embed 供嗅探
-        return "", embed
+        m3u8 = self._m3u8_from_player(play_url, embed)
+        return m3u8 or play_url
 
     def detailContent(self, ids):
         raw_id = ids[0] if isinstance(ids, (list, tuple)) else str(ids)
@@ -452,8 +559,6 @@ class Spider(SpiderBase):
         cover = self._wrap_img(self._extract_img(html))
         dur_m = re.search(r'class="duration"[^>]*>[\s\S]*?([0-9:]+)', html, re.I)
         dur_str = self._clean_text(dur_m.group(1)) if dur_m else ""
-        # 播放时实时解析，避免 token 过期
-        final_deliver = "raw_page@@%s" % target_url
         return {
             "list": [{
                 "vod_id": target_url,
@@ -462,41 +567,27 @@ class Spider(SpiderBase):
                 "vod_remarks": format_remarks("BestJAV", dur_str),
                 "vod_content": title,
                 "vod_play_from": "BestJAV",
-                "vod_play_url": "正片$%s" % final_deliver,
+                "vod_play_url": "正片$raw_page@@%s" % target_url,
             }]
         }
 
     def playerContent(self, flag, id, vipFlags):
         raw = str(id).strip()
         stream_url = ""
-        embed_url = ""
-        page = ""
-
         if raw.startswith("raw_page@@"):
-            page = raw.split("@@", 1)[1]
-            stream_url, embed_url = self._resolve_stream(page)
+            stream_url = self._resolve_stream(raw.split("@@", 1)[1])
         elif raw.startswith("http") and self.isVideoFormat(raw):
             stream_url = raw
-        elif raw.startswith("http") and "videplay" in raw and "/embed/" in raw:
-            emb = self._fetch(raw, referer=self.siteUrl + "/")
-            stream_url = self._m3u8_from_html(emb.get("text", ""))
-            if not stream_url:
-                vids = self._ids_from_embed(emb.get("text", ""))
-                stream_url = self._resolve_from_hosts(vids, raw)
-            embed_url = raw
         elif raw.startswith("http"):
-            stream_url, embed_url = self._resolve_stream(raw)
+            stream_url = self._resolve_stream(raw)
 
         headers = {
             "User-Agent": self._ua,
-            "Referer": self.siteUrl + "/",
-            "Origin": self.siteUrl,
+            "Referer": "https://7tv082.com/",
+            "Origin": "https://7tv082.com",
             "Accept": "*/*",
         }
-        if stream_url:
-            if any(x in stream_url for x in ("dramiyos", "mediastream", "cdn", "m3u8")):
-                headers["Referer"] = (embed_url or "https://api.videplay.us/") 
-                headers["Origin"] = "https://api.videplay.us"
+        if stream_url and self.isVideoFormat(stream_url):
             return {
                 "parse": 0,
                 "jx": 0,
@@ -504,19 +595,21 @@ class Spider(SpiderBase):
                 "url": stream_url,
                 "header": headers,
             }
-
-        # 嗅探 fallback：把 videplay embed 交给播放器
-        sniff = embed_url or page or raw
-        self.log("fallback sniff %s" % sniff[:50])
+        if stream_url:
+            # play.php 页也可能需再嗅探
+            return {
+                "parse": 1,
+                "jx": 0,
+                "playUrl": "",
+                "url": stream_url,
+                "header": headers,
+            }
         return {
             "parse": 1,
             "jx": 0,
             "playUrl": "",
-            "url": sniff,
-            "header": {
-                "User-Agent": self._ua,
-                "Referer": self.siteUrl + "/",
-            },
+            "url": raw,
+            "header": {"User-Agent": self._ua, "Referer": self.siteUrl + "/"},
         }
 
     def searchContent(self, key, quick, pg="1"):
