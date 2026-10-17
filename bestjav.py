@@ -628,32 +628,73 @@ class Spider(SpiderBase):
                 "vod_pic": cover,
                 "vod_remarks": format_remarks("BestJAV", dur_str),
                 "vod_content": title,
-                "vod_play_from": "BestJAV",
-                "vod_play_url": "正片$raw_page@@%s" % target_url,
+                "vod_play_from": "直链$$$网页",
+                "vod_play_url": "正片$raw_page@@%s$$$正片$web_page@@%s" % (target_url, target_url),
             }]
         }
 
+    def _resolve_ps_page(self, page_url, html=None):
+        """得到 videplay.us/ps/{vid} 网页播放地址（jwplayer，可嗅探/内嵌播）"""
+        if not html:
+            res = self._fetch(page_url)
+            html = res.get("text", "")
+        embed = self._extract_embed_url(html)
+        if not embed:
+            return ""
+        emb = self._fetch(embed, referer=page_url)
+        emb_html = emb.get("text", "")
+        play_url = self._decrypt_mvarr_sp(emb_html)
+        if play_url and "id=" in play_url:
+            vid = play_url.split("id=")[-1].strip()
+            if vid:
+                return "https://videplay.us/ps/" + vid
+        return embed or ""
+
     def playerContent(self, flag, id, vipFlags):
         raw = str(id).strip()
-        stream_url = ""
-        if raw.startswith("raw_page@@"):
-            stream_url = self._resolve_stream(raw.split("@@", 1)[1])
-        elif raw.startswith("http") and self.isVideoFormat(raw):
-            stream_url = raw
-        elif raw.startswith("http"):
-            stream_url = self._resolve_stream(raw)
-
         headers = {
             "User-Agent": self._ua,
             "Referer": "https://videplay.us/",
             "Origin": "https://videplay.us",
             "Accept": "*/*",
         }
-        if stream_url and "api.videplay.us" in stream_url:
-            headers["Referer"] = "https://videplay.us/"
-            headers["Origin"] = "https://videplay.us"
-        elif stream_url and "7tv082" in stream_url:
-            headers["Referer"] = "https://7tv082.com/"
+
+        # 网页线路：直接交给播放器打开 ps 页（jwplayer）
+        if raw.startswith("web_page@@"):
+            page = raw.split("@@", 1)[1]
+            ps = self._resolve_ps_page(page)
+            return {
+                "parse": 1,
+                "jx": 0,
+                "playUrl": "",
+                "url": ps or page,
+                "header": headers,
+            }
+
+        stream_url = ""
+        ps_page = ""
+        if raw.startswith("raw_page@@"):
+            page = raw.split("@@", 1)[1]
+            stream_url = self._resolve_stream(page)
+            # 同时准备网页备用
+            try:
+                ps_page = self._resolve_ps_page(page)
+            except Exception:
+                ps_page = ""
+        elif raw.startswith("http") and self.isVideoFormat(raw):
+            stream_url = raw
+        elif raw.startswith("http") and "videplay.us/ps/" in raw:
+            # 已是 ps 页
+            return {
+                "parse": 1,
+                "jx": 0,
+                "playUrl": "",
+                "url": raw,
+                "header": headers,
+            }
+        elif raw.startswith("http"):
+            stream_url = self._resolve_stream(raw)
+
         if stream_url and self.isVideoFormat(stream_url):
             return {
                 "parse": 0,
@@ -662,8 +703,17 @@ class Spider(SpiderBase):
                 "url": stream_url,
                 "header": headers,
             }
+
+        # 直链失败则回落网页
+        if ps_page:
+            return {
+                "parse": 1,
+                "jx": 0,
+                "playUrl": "",
+                "url": ps_page,
+                "header": headers,
+            }
         if stream_url:
-            # play.php 页也可能需再嗅探
             return {
                 "parse": 1,
                 "jx": 0,
