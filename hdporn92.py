@@ -1,31 +1,43 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-《遮天·轮海彼岸境·八转》—— hdporn92.com TVBox源
-境界：轮海秘境·彼岸境（大圆满·Doodstream+Filemoon双解析版）
-特征：Filemoon m3u8提取 + Doodstream pass_md5解析 + 86个制片商分类
-"""
-
-import sys
+# hdporn92.com - 蜂蜜影视爬虫
+# 播放源：morencius/vidhide packer 解出 m3u8；兼容 filemoon / doodstream
 import re
 import json
 import base64
-import urllib.request
-import urllib.parse
+import requests
+import urllib3
+from urllib.parse import urljoin, urlparse, quote, unquote
 
-sys.path.append("..")
-from base.spider import Spider
+try:
+    from base.spider import Spider as BaseSpider
+except ImportError:
+    class BaseSpider(object):
+        pass
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
-class Spider(Spider):
-    def __init__(self):
+class Spider(BaseSpider):
+    def init(self, extend=""):
         self.siteUrl = "https://hdporn92.com"
+        self.ua = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+        )
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": self.ua,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
-            "Referer": "https://hdporn92.com/",
+            "Referer": self.siteUrl + "/",
         }
+        self.session = requests.Session()
+        self.session.headers.update(self.headers)
+        ad = requests.adapters.HTTPAdapter(pool_connections=8, pool_maxsize=16)
+        self.session.mount("http://", ad)
+        self.session.mount("https://", ad)
+        self.proxy = None
+        self._apply_extend(extend)
+
         self.filemoon_domains = (
             "filemoon.sx", "filemoon.to", "filemoon.top",
             "filemoon.in", "filemoon.nl", "filemoon.wf",
@@ -35,6 +47,12 @@ class Spider(Spider):
             "dood.ws", "dood.sh", "dood.yt", "dood.la", "dood.wf",
             "doodstream.co", "dood.cx", "dood.pm", "dood.so",
         )
+        # vidhide 系嵌入域
+        self.vidhide_domains = (
+            "morencius.com", "vidhide.com", "vidhidepro.com", "vidhidepre.com",
+            "earnvids.com", "smoothpre.com", "filemoon.nl",
+        )
+
         self.categories = [
             {"type_id": "", "type_name": "首页"},
             {"type_id": "fillupmymom", "type_name": "Fillup My Mom"},
@@ -125,114 +143,103 @@ class Spider(Spider):
             {"type_id": "backroomcastingcouch", "type_name": "Backroom Casting Couch"},
         ]
 
+    def _apply_extend(self, extend):
+        if not extend:
+            return
+        obj = extend
+        if isinstance(extend, str):
+            extend = extend.strip()
+            if not extend:
+                return
+            try:
+                obj = json.loads(extend)
+            except Exception:
+                if extend.startswith("http") or extend.startswith("socks"):
+                    obj = {"proxy": extend}
+                else:
+                    return
+        if isinstance(obj, dict):
+            proxy = obj.get("proxy") or obj.get("proxies")
+            if proxy:
+                if isinstance(proxy, dict):
+                    self.proxy = proxy
+                else:
+                    self.proxy = {"http": proxy, "https": proxy}
+
+    def getName(self):
+        return "HDPorn92"
+
     def log(self, msg):
-        print("[遮天·彼岸境] " + str(msg))
+        try:
+            print("[hdporn92] %s" % msg)
+        except Exception:
+            pass
 
     def fetch(self, url, headers=None):
         h = dict(self.headers)
         if headers:
             h.update(headers)
         try:
-            req = urllib.request.Request(url, headers=h)
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = resp.read()
-                for enc in ("utf-8", "gbk", "latin-1"):
-                    try:
-                        return data.decode(enc)
-                    except:
-                        pass
-                return data.decode("utf-8", errors="ignore")
+            r = self.session.get(
+                url, headers=h, timeout=20, verify=False,
+                proxies=self.proxy, allow_redirects=True,
+            )
+            r.encoding = r.apparent_encoding or "utf-8"
+            return r.text
         except Exception as e:
-            self.log("fetch error: " + str(e))
+            self.log("fetch %s" % e)
             return ""
 
     def homeContent(self, filter):
-        return {"class": self.categories}
+        return {"class": self.categories, "filters": {}}
+
+    def homeVideoContent(self):
+        html = self.fetch(self.siteUrl + "/")
+        return {"list": self._parse_list(html)}
 
     def categoryContent(self, tid, pg, filter, extend):
-        if tid == "":
-            if pg == "1":
-                url = self.siteUrl + "/"
-            else:
-                url = self.siteUrl + "/page/" + str(pg) + "/?0"
+        pg = str(pg or "1")
+        if not tid:
+            url = self.siteUrl + "/" if pg == "1" else self.siteUrl + "/page/%s/" % pg
         else:
-            if pg == "1":
-                url = self.siteUrl + "/category/" + tid + "/"
-            else:
-                url = self.siteUrl + "/category/" + tid + "/page/" + str(pg) + "/"
-
-        self.log("category: " + url)
+            url = (
+                self.siteUrl + "/category/%s/" % tid
+                if pg == "1"
+                else self.siteUrl + "/category/%s/page/%s/" % (tid, pg)
+            )
         html = self.fetch(url)
-        if not html:
-            return {"list": [], "page": pg, "pagecount": 1, "limit": 24, "total": 0}
-
         videos = self._parse_list(html)
         pagecount = self._extract_pagecount(html, pg)
         return {
             "list": videos,
-            "page": pg,
+            "page": int(pg),
             "pagecount": pagecount,
             "limit": 24,
             "total": int(pagecount) * 24,
         }
 
-    def _parse_list(self, html):
-        videos = []
-        patternA = re.compile(
-            r'<article[^>]*class="[^"]*post[^"*"[^>]*>.*?<a[^>]*href="([^"]+)"[^>]*title="([^"]*)"[^>]*>.*?<img[^>]*(?:src|data-src|data-original)="([^"]+)"[^>]*>.*?(?:<span[^>]*class="[^"]*duration[^"]*"[^>]*>([^<]*)</span>)?.*?</article>',
-            re.DOTALL | re.IGNORECASE,
-        )
-        matches = patternA.findall(html)
-        if matches:
-            self.log("patternA hit: " + str(len(matches)))
-            for m in matches:
-                videos.append(self._build_video(m[0], m[1], m[2], m[3] if len(m) > 3 else ""))
-
-        if not videos:
-            patternB = re.compile(
-                r'<div[^>]*class="[^"]*(?:video-item|thumb|post-item)[^"]*"[^>]*>.*?<a[^>]*href="([^"]+)"[^>]*>.*?<img[^>]*(?:src|data-src)="([^"]+)"[^>]*(?:title|alt)="([^"]*)"[^>]*>.*?(?:<span[^>]*>([^<]*(?:min|sec)[^<]*)</span>)?.*?</div>',
-                re.DOTALL | re.IGNORECASE,
-            )
-            matches = patternB.findall(html)
-            if matches:
-                self.log("patternB hit: " + str(len(matches)))
-                for m in matches:
-                    videos.append(self._build_video(m[0], m[2], m[1], m[3] if len(m) > 3 else ""))
-
-        if not videos:
-            patternC = re.compile(
-                r'<a[^>]*href="([^"]+)"[^>]*title="([^"]*)"[^>]*>.*?<img[^>]*src="([^"]+)"[^>]*>',
-                re.DOTALL | re.IGNORECASE,
-            )
-            matches = patternC.findall(html)
-            if matches:
-                self.log("patternC hit: " + str(len(matches)))
-                for m in matches:
-                    videos.append(self._build_video(m[0], m[1], m[2], ""))
-
-        seen = set()
-        unique = []
-        for v in videos:
-            vid = v.get("vod_id", "")
-            if vid and vid not in seen:
-                seen.add(vid)
-                unique.append(v)
-        self.log("parsed videos: " + str(len(unique)))
-        return unique
+    def searchContent(self, key, quick, pg="1"):
+        pg = str(pg or "1")
+        q = quote(key)
+        if pg == "1":
+            url = self.siteUrl + "/?s=" + q
+        else:
+            url = self.siteUrl + "/page/%s/?s=%s" % (pg, q)
+        html = self.fetch(url)
+        return {"list": self._parse_list(html)}
 
     def _decode_html_entities(self, text):
         if not text:
             return text
         entities = {
             "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"',
-            "&apos;": "'", "&#8211;": "–", "&#8212;": "—", "&#8216;": "'",
-            "&#8217;": "'", "&#8220;": '"', "&#8221;": '"', "&#8230;": "…",
-            "&#038;": "&", "&#39;": "'", "&nbsp;": " ", "&#160;": " ",
-            "&#x27;": "'", "&#x2F;": "/", "&#x3C;": "<", "&#x3E;": ">",
+            "&apos;": "'", "&#8211;": "–", "&#8212;": "—",
+            "&#8216;": "'", "&#8217;": "'", "&#8220;": '"', "&#8221;": '"',
+            "&#8230;": "…", "&#038;": "&", "&#39;": "'", "&nbsp;": " ",
         }
         for ent, char in entities.items():
             text = text.replace(ent, char)
-        text = re.sub(r"&#([0-9]+);", lambda m: chr(int(m.group(1))), text)
+        text = re.sub(r"&#(\d+);", lambda m: chr(int(m.group(1))), text)
         text = re.sub(r"&#x([0-9a-fA-F]+);", lambda m: chr(int(m.group(1), 16)), text)
         return text.strip()
 
@@ -242,460 +249,346 @@ class Spider(Spider):
         title = re.sub(r"<[^>]+>", "", title)
         title = self._decode_html_entities(title)
         title = re.sub(r"[ \t]+", " ", title).strip()
-        return title if title else "未命名"
+        return title or "未命名"
+
+    def _parse_list(self, html):
+        if not html:
+            return []
+        videos, seen = [], set()
+        # article.post 结构
+        for m in re.finditer(
+            r'<article[^>]*>[\s\S]*?<a[^>]+href="([^"]+)"[^>]*title="([^"]*)"[^>]*>[\s\S]*?<img[^>]+(?:src|data-src|data-original)="([^"]+)"',
+            html,
+            re.I,
+        ):
+            href, title, pic = m.group(1), m.group(2), m.group(3)
+            if href in seen:
+                continue
+            if "/category/" in href or "/tag/" in href or "/page/" in href:
+                continue
+            seen.add(href)
+            remark = ""
+            dm = re.search(
+                r'duration[^>]*>([^<]+)',
+                html[m.start() : m.start() + 800],
+                re.I,
+            )
+            if dm:
+                remark = dm.group(1).strip()
+            videos.append(self._build_video(href, title, pic, remark))
+
+        if not videos:
+            for m in re.finditer(
+                r'<a[^>]+href="(https?://hdporn92\.com/[^"]+/)"[^>]*title="([^"]+)"[^>]*>[\s\S]{0,400}?<img[^>]+src="([^"]+)"',
+                html,
+                re.I,
+            ):
+                href = m.group(1)
+                if href in seen or "/category/" in href:
+                    continue
+                seen.add(href)
+                videos.append(self._build_video(href, m.group(2), m.group(3), ""))
+        self.log("list %d" % len(videos))
+        return videos
 
     def _build_video(self, href, title, pic, remark):
-        if href:
-            if not href.startswith("http"):
-                href = urllib.parse.urljoin(self.siteUrl, href)
-            if not href.endswith("/"):
-                href += "/"
+        if href and not href.startswith("http"):
+            href = urljoin(self.siteUrl, href)
+        if href and not href.endswith("/"):
+            href += "/"
         if pic and not pic.startswith("http"):
-            pic = urllib.parse.urljoin(self.siteUrl, pic)
+            pic = urljoin(self.siteUrl, pic)
         return {
             "vod_id": href,
             "vod_name": self._clean_title(title),
             "vod_pic": pic,
-            "vod_remarks": self._decode_html_entities(remark.strip()) if remark else "HD",
+            "vod_remarks": self._decode_html_entities(remark) if remark else "HD",
         }
 
     def _extract_pagecount(self, html, current_pg):
         try:
             max_page = int(current_pg)
-            for m in re.finditer(r'page/([0-9]+)/', html):
-                p = int(m.group(1))
-                if p > max_page:
-                    max_page = p
-            if ">Next" in html or "next page" in html.lower() or 'class="next"' in html:
+            for m in re.finditer(r"/page/(\d+)/", html):
+                max_page = max(max_page, int(m.group(1)))
+            if re.search(r'class="[^"]*next', html, re.I) or "next page" in html.lower():
                 max_page = max(max_page, int(current_pg) + 1)
             return max_page
-        except:
-            return 999
+        except Exception:
+            return int(current_pg) + 1
 
-    def _is_filemoon(self, url):
-        if not url:
-            return False
-        domain = urllib.parse.urlparse(url).netloc.lower()
-        return any(d in domain for d in self.filemoon_domains)
+    # ---------- Dean Edwards packer ----------
+    def _to_base(self, n, base):
+        if n == 0:
+            return "0"
+        digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+        s = ""
+        while n:
+            s = digits[n % base] + s
+            n //= base
+        return s
 
-    def _parse_filemoon(self, url):
-        self.log("Filemoon parsing: " + url)
-        html = self.fetch(url)
-        if not html:
+    def _unpack_packer(self, html):
+        """解 eval(function(p,a,c,k,e,d){while(c--)...}('...',radix,count,'k|k|...'.split('|'))"""
+        # 兼容 RegExp 参数里的嵌套括号
+        m = re.search(
+            r"eval\(function\(p,a,c,k,e,d\)\{while\(c--\)if\(k\[c\]\)p=p\.replace"
+            r"\(new RegExp\(.*?\),k\[c\]\);return p\}"
+            r"\('([\s\S]*?)',(\d+),(\d+),'([\s\S]*?)'\.split\('\|'\)\)",
+            html,
+        )
+        if not m:
+            # 宽松：直接抓 payload / radix / count / keys
+            m = re.search(
+                r"return p\}\('([\s\S]*?)',(\d+),(\d+),'([\s\S]*?)'\.split\('\|'\)\)",
+                html,
+            )
+        if not m:
             return ""
+        payload, radix, count, keys_s = (
+            m.group(1),
+            int(m.group(2)),
+            int(m.group(3)),
+            m.group(4),
+        )
+        keys = keys_s.split("|")
+        p = payload
+        c = count
+        while c:
+            c -= 1
+            if c < len(keys) and keys[c]:
+                p = re.sub(r"\b" + re.escape(self._to_base(c, radix)) + r"\b", keys[c], p)
+        return p
 
-        m = re.search(r'sources[ \t]*:[ \t]*\[[^\]]*\{[^}]*file[ \t]*:[ \t]*"([^"]+)"', html, re.IGNORECASE)
+    def _extract_m3u8_from_embed(self, embed_html):
+        if not embed_html:
+            return ""
+        # 先解 packer
+        unpacked = self._unpack_packer(embed_html)
+        src = unpacked or embed_html
+        # hls2 优先（带签名的 m3u8）
+        m = re.search(
+            r'["\']hls2["\']\s*:\s*["\'](https?://[^"\']+\.m3u8[^"\']*)["\']',
+            src,
+        )
         if m:
-            self.log("Filemoon sources = " + m.group(1))
-            return m.group(1)
-
-        m = re.search(r'jwplayer[^(]*\([^)]+\)[ \t]*\.[ \t]*setup[ \t]*\([^\)]*sources[ \t]*:[ \t]*\[[^\]]*\{[^}]*file[ \t]*:[ \t]*"([^"]+)"', html, re.DOTALL | re.IGNORECASE)
+            return m.group(1).replace("\\/", "/")
+        m = re.search(r'https?://[^"\'\s\\]+\.m3u8[^"\'\s\\]*', src)
         if m:
-            self.log("Filemoon jwplayer = " + m.group(1))
-            return m.group(1)
-
-        m = re.search(r'<video[^>]+src="([^"]+)"', html, re.IGNORECASE)
+            return m.group(0).replace("\\/", "/")
+        # links 对象
+        m = re.search(
+            r'links\s*=\s*\{[^}]*hls2["\']?\s*:\s*["\']([^"\']+)["\']',
+            src,
+        )
         if m:
-            self.log("Filemoon video = " + m.group(1))
-            return m.group(1)
-
-        m = re.search(r'<source[^>]+src="([^"]+)"[^>]+type="application/x-mpegURL"', html, re.IGNORECASE)
+            return m.group(1).replace("\\/", "/")
+        m = re.search(r'file\s*:\s*["\'](https?://[^"\']+)["\']', src)
         if m:
-            self.log("Filemoon source = " + m.group(1))
-            return m.group(1)
-
-        m = re.search(r'["\']([^"\']+[.]m3u8[^"\']*)["\']', html, re.IGNORECASE)
-        if m:
-            self.log("Filemoon m3u8 = " + m.group(1))
-            return m.group(1)
-
-        if re.search(r'eval\(function\(p,a,c,k,e,d\)', html):
-            m = re.search(r'eval\(function\(p,a,c,k,e,d\)[^\)]+\)\)[ \t]*;?\s*var\s+\w+\s*=\s*\{[^\}]*file\s*:\s*"([^"]+)"', html, re.DOTALL | re.IGNORECASE)
-            if m:
-                self.log("Filemoon eval = " + m.group(1))
-                return m.group(1)
-
-        # Filemoon /download/ 路径可能是直接下载链接
-        if "/download/" in url:
-            self.log("Filemoon download link = " + url)
-            return url
-
-        if "/d/" in url:
-            # 尝试 /download/ 变体
-            vid = ""
-            m = re.search(r"/d/([a-zA-Z0-9_-]+)", url)
-            if m:
-                vid = m.group(1)
-                parsed = urllib.parse.urlparse(url)
-                download_url = parsed.scheme + "://" + parsed.netloc + "/download/" + vid
-                self.log("Filemoon try download = " + download_url)
-                # 测试下载链接是否可用
-                dl_html = self.fetch(download_url)
-                if dl_html and ("video" in dl_html.lower() or "mp4" in dl_html.lower() or "m3u8" in dl_html.lower()):
-                    self.log("Filemoon download valid")
-                    return download_url
-
-            embed = url.replace("/d/", "/e/", 1)
-            self.log("Filemoon fallback embed = " + embed)
-            return embed
-
-        self.log("Filemoon parse failed")
+            return m.group(1).replace("\\/", "/")
         return ""
 
-    def _is_doodstream(self, url):
+    def _domain_in(self, url, domains):
         if not url:
             return False
-        domain = urllib.parse.urlparse(url).netloc.lower()
-        return any(d in domain for d in self.dood_domains)
-
-    def _parse_doodstream(self, url):
-        self.log("Doodstream parsing: " + url)
-        html = self.fetch(url)
-        if not html:
-            self.log("Doodstream fetch empty")
-            return ""
-
-        m = re.search(r'<video[^>]+src="([^"]+)"', html, re.IGNORECASE)
-        if m:
-            self.log("Doodstream video = " + m.group(1))
-            return m.group(1)
-
-        m = re.search(r'<source[^>]+src="([^"]+)"', html, re.IGNORECASE)
-        if m:
-            self.log("Doodstream source = " + m.group(1))
-            return m.group(1)
-
-        pass_md5 = ""
-        m = re.search(r"pass_md5/([a-zA-Z0-9_-]+)", html)
-        if m:
-            pass_md5 = m.group(1)
-            self.log("Doodstream pass_md5 id = " + pass_md5)
-
-        if pass_md5:
-            parsed = urllib.parse.urlparse(url)
-            base = parsed.scheme + "://" + parsed.netloc
-            token_url = base + "/pass_md5/" + pass_md5
-            self.log("Doodstream token url = " + token_url)
-
-            token_html = self.fetch(token_url, headers={"Referer": url})
-            if token_html and token_html.strip():
-                self.log("Doodstream token raw = " + token_html[:200])
-
-                if token_html.startswith("http"):
-                    self.log("Doodstream token full url = " + token_html.strip())
-                    return token_html.strip()
-
-                video_id = ""
-                m2 = re.search(r"/[ed]/([a-zA-Z0-9_-]+)", url)
-                if m2:
-                    video_id = m2.group(1)
-
-                if video_id:
-                    direct = base + "/d/" + video_id + "?token=" + token_html.strip()
-                    self.log("Doodstream direct = " + direct)
-                    return direct
-
-        m = re.search(r'["\']([^"\']+[.]m3u8[^"\']*)["\']', html, re.IGNORECASE)
-        if m:
-            self.log("Doodstream m3u8 = " + m.group(1))
-            return m.group(1)
-
-        m = re.search(r'["\']([^"\']+[.]mp4[^"\']*)["\']', html, re.IGNORECASE)
-        if m:
-            self.log("Doodstream mp4 = " + m.group(1))
-            return m.group(1)
-
-        self.log("Doodstream parse failed, fallback")
-        return url
-
-    def _is_third_party_host(self, url):
-        if not url:
-            return False
-        domain = urllib.parse.urlparse(url).netloc.lower()
-        third_parties = (
-            "filemoon", "streamtape", "dood", "vidcloud", "vidoza",
-            "voe", "mixdrop", "streamsb", "sbembed", "bravoplayer",
-            "playernow", "streamwish", "filelions", "embedrise",
-            "vanfem", "streamhide", "luluvdo", "vidmoly", "upstream",
-            "doodstream",
-        )
-        return any(tp in domain for tp in third_parties)
+        host = urlparse(url).netloc.lower()
+        return any(d in host for d in domains)
 
     def detailContent(self, ids):
-        url = ids[0]
+        url = ids[0] if isinstance(ids, (list, tuple)) else str(ids)
         if not url.startswith("http"):
-            url = urllib.parse.urljoin(self.siteUrl, url)
+            url = urljoin(self.siteUrl, url)
         if not url.endswith("/"):
             url += "/"
 
-        self.log("detail: " + url)
         html = self.fetch(url)
         if not html:
-            self.log("detail fetch empty")
             return {"list": []}
 
-        title = self._extract_title(html)
-        pic = self._extract_detail_pic(html)
-        self.log("detail title: " + title)
+        title = "未知标题"
+        for pat in (
+            r"<h1[^>]*>(.*?)</h1>",
+            r'property="og:title"\s+content="([^"]+)"',
+            r"<title>(.*?)</title>",
+        ):
+            m = re.search(pat, html, re.I | re.S)
+            if m:
+                t = self._clean_title(m.group(1))
+                if t and t != "未命名":
+                    title = t
+                    break
+
+        pic = ""
+        m = re.search(r'property="og:image"\s+content="([^"]+)"', html, re.I)
+        if m:
+            pic = m.group(1)
 
         play_url = self._extract_video_url(html, url)
-
         if not play_url:
             play_url = url
-            self.log("fallback to detail page")
-
-        if play_url and not play_url.startswith("http") and not play_url.startswith("eval://"):
-            play_url = urllib.parse.urljoin(self.siteUrl, play_url)
-        if play_url.startswith("//"):
-            play_url = "https:" + play_url
-
-        self.log("final play_url: " + play_url)
 
         return {
             "list": [{
-                "vod_id": ids[0],
+                "vod_id": ids[0] if isinstance(ids, (list, tuple)) else url,
                 "vod_name": title,
                 "vod_pic": pic,
                 "vod_play_from": "HDPlayer",
-                "vod_play_url": "第1集$" + play_url,
-                "vod_content": "source: " + url,
+                "vod_play_url": "正片$%s" % play_url,
+                "vod_content": "",
             }]
         }
 
     def _extract_video_url(self, html, referer_url):
-        play_url = ""
+        # 1) 详情页直链
+        m = re.search(r'<video[^>]+src="([^"]+)"', html, re.I)
+        if m and (".m3u8" in m.group(1) or ".mp4" in m.group(1)):
+            return m.group(1)
 
-        m = re.search(r'<video[^>]+src="([^"]+)"', html, re.IGNORECASE)
-        if m:
-            play_url = m.group(1)
-            self.log("L1: video src = " + play_url)
-            return play_url
+        # 2) 所有 iframe（跳过广告）
+        iframes = re.findall(r'<iframe[^>]+src="([^"]+)"', html, re.I)
+        for src in iframes:
+            if src.startswith("//"):
+                src = "https:" + src
+            elif src.startswith("/"):
+                src = urljoin(self.siteUrl, src)
+            low = src.lower()
+            if any(x in low for x in ("smartflora", "ad", "ads.", "doubleclick", "pop")):
+                continue
 
-        m = re.search(r'<source[^>]+src="([^"]+)"[^>]+type="video/', html, re.IGNORECASE)
-        if m:
-            play_url = m.group(1)
-            self.log("L2: source = " + play_url)
-            return play_url
+            # VidHide / morencius
+            if self._domain_in(src, self.vidhide_domains) or "/embed/" in low:
+                emb = self.fetch(src, headers={"Referer": referer_url})
+                m3u8 = self._extract_m3u8_from_embed(emb)
+                if m3u8:
+                    self.log("vidhide m3u8 ok")
+                    return m3u8
+                # 嗅探兜底
+                if emb and ("jwplayer" in emb or "packer" in emb or "eval(function" in emb):
+                    return src
 
-        iframe_src = ""
-        m = re.search(r'<iframe[^>]+src="([^"]+)"', html, re.IGNORECASE)
-        if m:
-            iframe_src = m.group(1)
-            self.log("L3: iframe raw = " + iframe_src)
-
-        if iframe_src:
-            if iframe_src.startswith("//"):
-                iframe_src = "https:" + iframe_src
-            elif iframe_src.startswith("/"):
-                iframe_src = urllib.parse.urljoin(self.siteUrl, iframe_src)
-            elif not iframe_src.startswith("http"):
-                iframe_src = urllib.parse.urljoin(self.siteUrl, iframe_src)
-
-            self.log("L3: iframe normalized = " + iframe_src)
-
-            if self._is_filemoon(iframe_src):
-                self.log("L3: filemoon detected")
-                fm = self._parse_filemoon(iframe_src)
+            if self._domain_in(src, self.filemoon_domains):
+                fm = self._parse_filemoon(src)
                 if fm:
                     return fm
-                if "/d/" in iframe_src:
-                    return iframe_src.replace("/d/", "/e/", 1)
-                return iframe_src
+                return src
 
-            if self._is_doodstream(iframe_src):
-                self.log("L3: doodstream detected")
-                ds = self._parse_doodstream(iframe_src)
+            if self._domain_in(src, self.dood_domains):
+                ds = self._parse_doodstream(src)
                 if ds:
                     return ds
-                return iframe_src
+                return src
 
-            if self._is_third_party_host(iframe_src):
-                self.log("L3: third-party iframe = " + iframe_src)
-                return iframe_src
-
-            iframe_html = self.fetch(iframe_src)
-            if iframe_html:
-                for pat in (
-                    r'<video[^>]+src="([^"]+)"',
-                    r'<source[^>]+src="([^"]+)"',
-                    r'["\']([^"\']+[.]m3u8[^"\']*)["\']',
-                    r'["\']([^"\']+[.]mp4[^"\']*)["\']',
-                ):
-                    m2 = re.search(pat, iframe_html, re.IGNORECASE)
-                    if m2:
-                        inner = m2.group(1)
-                        if not self._is_third_party_host(inner):
-                            play_url = inner
-                            self.log("L3: iframe inner = " + play_url)
-                            break
-
-            if not play_url:
-                play_url = iframe_src
-                self.log("L3: iframe direct = " + play_url)
-            return play_url
-
-        m = re.search(r'["\']([^"\']+[.]m3u8[^"\']*)["\']', html, re.IGNORECASE)
-        if m:
-            c = m.group(1)
-            if not self._is_third_party_host(c):
-                play_url = c
-                self.log("L4: m3u8 = " + play_url)
-                return play_url
-            self.log("L4: skip third-party m3u8")
-
-        m = re.search(r'["\']([^"\']+[.]mp4[^"\']*)["\']', html, re.IGNORECASE)
-        if m:
-            c = m.group(1)
-            if not self._is_third_party_host(c):
-                play_url = c
-                self.log("L5: mp4 = " + play_url)
-                return play_url
-            self.log("L5: skip third-party mp4")
-
-        m = re.search(r'data-video="([^"]+)"', html, re.IGNORECASE)
-        if m:
-            play_url = m.group(1)
-            self.log("L6: data-video = " + play_url)
-            return play_url
-
-        m = re.search(r'data-src="([^"]+)"', html, re.IGNORECASE)
-        if m:
-            v = m.group(1)
-            if ".m3u8" in v or ".mp4" in v or "player" in v:
-                play_url = v
-                self.log("L7: data-src = " + play_url)
-                return play_url
-
-        m = re.search(r'meta[ \t]+property="og:video"[ \t]+content="([^"]+)"', html, re.IGNORECASE)
-        if m:
-            play_url = m.group(1)
-            self.log("L8: og:video = " + play_url)
-            return play_url
-
-        m = re.search(r'"contentUrl"[ \t]*:[ \t]*"([^"]+)"', html)
-        if m:
-            play_url = m.group(1)
-            self.log("L9: JSON-LD = " + play_url)
-            return play_url
-
-        for var_name in ("video_url", "videoUrl", "source", "file", "url"):
-            pat = r'var[ \t]+' + var_name + r'[ \t]*=[ \t]*"([^"]+)"'
-            m = re.search(pat, html, re.IGNORECASE)
+            # 其它第三方：尝试解 packer / 取 m3u8
+            emb = self.fetch(src, headers={"Referer": referer_url})
+            m3u8 = self._extract_m3u8_from_embed(emb)
+            if m3u8:
+                return m3u8
+            m = re.search(r'https?://[^"\']+\.m3u8[^"\']*', emb or "")
             if m:
-                v = m.group(1)
-                if v.startswith("http") or ".m3u8" in v or ".mp4" in v:
-                    play_url = v
-                    self.log("L10: var " + var_name + " = " + play_url)
-                    return play_url
+                return m.group(0)
 
-        for m in re.finditer(r'["\']([A-Za-z0-9+/=]{50,})["\']', html):
-            try:
-                decoded = base64.b64decode(m.group(1)).decode("utf-8")
-                if decoded.startswith("http") and (".m3u8" in decoded or ".mp4" in decoded or "player" in decoded):
-                    play_url = decoded
-                    self.log("L11: base64 = " + play_url)
-                    return play_url
-            except:
-                pass
-
-        if re.search(r'eval\(function\(p,a,c,k,e,d\)', html):
-            return "eval://" + referer_url
-
-        m = re.search(r'<a[^>]+href="([^"]+\.(?:m3u8|mp4)[^"]*)"', html, re.IGNORECASE)
+        # 3) 页内 m3u8
+        m = re.search(r'https?://[^"\']+\.m3u8[^"\']*', html)
         if m:
-            play_url = m.group(1)
-            self.log("L12: a link = " + play_url)
-            return play_url
-
+            return m.group(0)
         return ""
 
-    def _extract_title(self, html):
+    def _parse_filemoon(self, url):
+        html = self.fetch(url)
+        if not html:
+            return ""
         for pat in (
-            r'<h1[^>]*>(.*?)</h1>',
-            r'<title>(.*?)</title>',
-            r'"name"[ \t]*:[ \t]*"([^"]+)"',
-            r'meta[ \t]+property="og:title"[ \t]+content="([^"]+)"',
+            r'file\s*:\s*["\']([^"\']+\.m3u8[^"\']*)["\']',
+            r'sources\s*:\s*\[[^\]]*file\s*:\s*["\']([^"\']+)["\']',
+            r'https?://[^"\']+\.m3u8[^"\']*',
         ):
-            m = re.search(pat, html, re.DOTALL | re.IGNORECASE)
+            m = re.search(pat, html, re.I)
             if m:
-                t = self._clean_title(m.group(1))
-                if t and t != "未命名":
-                    return t
-        return "未知标题"
+                return m.group(1) if m.lastindex else m.group(0)
+        unpacked = self._unpack_packer(html)
+        if unpacked:
+            m = re.search(r'https?://[^"\']+\.m3u8[^"\']*', unpacked)
+            if m:
+                return m.group(0)
+        return ""
 
-    def _extract_detail_pic(self, html):
-        m = re.search(r'meta[ \t]+property="og:image"[ \t]+content="([^"]+)"', html, re.IGNORECASE)
+    def _parse_doodstream(self, url):
+        html = self.fetch(url)
+        if not html:
+            return ""
+        m = re.search(r"pass_md5/([a-zA-Z0-9_-]+)", html)
         if m:
-            return m.group(1)
-        m = re.search(r'<video[^>]+poster="([^"]+)"', html, re.IGNORECASE)
+            parsed = urlparse(url)
+            base = parsed.scheme + "://" + parsed.netloc
+            token = self.fetch(
+                base + "/pass_md5/" + m.group(1),
+                headers={"Referer": url},
+            )
+            if token and token.strip().startswith("http"):
+                return token.strip()
+            mid = re.search(r"/[ed]/([a-zA-Z0-9_-]+)", url)
+            if token and mid:
+                return base + "/d/" + mid.group(1) + "?token=" + token.strip()
+        m = re.search(r'https?://[^"\']+\.m3u8[^"\']*', html)
         if m:
-            return m.group(1)
+            return m.group(0)
         return ""
 
     def playerContent(self, flag, id, vipFlags):
-        if not id:
-            return {"parse": 1, "url": "", "header": ""}
+        url = unquote(str(id or "")).strip()
+        if not url:
+            return {"parse": 1, "url": "", "header": {}}
 
-        if id.startswith("eval://"):
-            return {"parse": 1, "url": id.replace("eval://", ""), "header": ""}
+        headers = {
+            "User-Agent": self.ua,
+            "Referer": self.siteUrl + "/",
+        }
 
-        if self._is_filemoon(id) and ".m3u8" in id:
-            self.log("player: filemoon m3u8 direct")
-            return {"parse": 0, "url": id, "header": ""}
+        # 已是直链
+        if any(x in url.lower() for x in (".m3u8", ".mp4", ".mkv")):
+            # m3u8 常需带上嵌入域 Referer
+            if "dramiyos" in url or "mediastream" in url or "cdn" in url:
+                headers["Referer"] = "https://morencius.com/"
+                headers["Origin"] = "https://morencius.com"
+            return {"parse": 0, "jx": 0, "url": url, "header": headers}
 
-        if self._is_filemoon(id):
-            self.log("player: filemoon parse=1")
-            return {"parse": 1, "url": id, "header": ""}
+        # 嵌入页：再解一次
+        if self._domain_in(url, self.vidhide_domains) or "/embed/" in url:
+            emb = self.fetch(url, headers={"Referer": self.siteUrl + "/"})
+            m3u8 = self._extract_m3u8_from_embed(emb)
+            if m3u8:
+                headers["Referer"] = "https://morencius.com/"
+                headers["Origin"] = "https://morencius.com"
+                return {"parse": 0, "jx": 0, "url": m3u8, "header": headers}
+            return {"parse": 1, "jx": 0, "url": url, "header": headers}
 
-        if self._is_doodstream(id) and ("token=" in id or ".m3u8" in id or ".mp4" in id):
-            self.log("player: doodstream direct")
-            return {"parse": 0, "url": id, "header": ""}
+        if self._domain_in(url, self.filemoon_domains):
+            fm = self._parse_filemoon(url)
+            if fm and (".m3u8" in fm or ".mp4" in fm):
+                return {"parse": 0, "jx": 0, "url": fm, "header": headers}
+            return {"parse": 1, "jx": 0, "url": url, "header": headers}
 
-        if self._is_doodstream(id):
-            self.log("player: doodstream parse=1")
-            return {"parse": 1, "url": id, "header": ""}
+        if self._domain_in(url, self.dood_domains):
+            ds = self._parse_doodstream(url)
+            if ds and (".m3u8" in ds or ".mp4" in ds or "token=" in ds):
+                return {"parse": 0, "jx": 0, "url": ds, "header": headers}
+            return {"parse": 1, "jx": 0, "url": url, "header": headers}
 
-        if self._is_third_party_host(id):
-            self.log("player: third-party parse=1")
-            return {"parse": 1, "url": id, "header": ""}
-
-        if id.startswith("http") and ("player" in id or "embed" in id or "iframe" in id):
-            return {"parse": 1, "url": id, "header": ""}
-
-        if id.startswith("http") and (".m3u8" in id or ".mp4" in id):
-            return {"parse": 0, "url": id, "header": ""}
-
-        return {"parse": 1, "url": id, "header": ""}
-
-    def searchContent(self, key, quick, pg="1"):
-        url = self.siteUrl + "/?s=" + urllib.parse.quote(key)
-        if pg != "1":
-            url = self.siteUrl + "/page/" + str(pg) + "/?s=" + urllib.parse.quote(key)
-        self.log("search: " + url)
-        html = self.fetch(url)
-        if not html:
-            return {"list": []}
-        videos = self._parse_list(html)
-        return {"list": videos, "page": pg}
-
-    def searchContentPage(self, key, quick, pg):
-        return self.searchContent(key, quick, pg)
-
-    def localProxy(self, param):
-        return [404, "text/plain", "Not Implemented"]
+        return {"parse": 1, "jx": 0, "url": url, "header": headers}
 
     def isVideoFormat(self, url):
-        return any(fmt in url.lower() for fmt in (".m3u8", ".mp4", ".flv", ".mkv", ".ts"))
+        if not url:
+            return False
+        low = url.lower()
+        return any(x in low for x in (".m3u8", ".mp4", ".flv", ".mkv", ".ts"))
 
     def manualVideoCheck(self):
-        return False
-
-    def init(self, extend=""):
-        self.log("init ok")
         return True
 
+    def localProxy(self, param):
+        return [404, "text/plain", b"Not Implemented"]
 
-if __name__ == "__main__":
-    sp = Spider()
-    sp.init()
-    print(json.dumps(sp.homeContent(None), ensure_ascii=False, indent=2))
+    def destroy(self):
+        try:
+            self.session.close()
+        except Exception:
+            pass
