@@ -205,6 +205,9 @@ class Spider(BaseSpider):
     def detailContent(self, ids):
         result = {"list": []}
         try:
+            import base64
+            from urllib.parse import urljoin
+
             url = ids[0]
             if not url.startswith("http"):
                 url = self.host + url
@@ -217,7 +220,7 @@ class Spider(BaseSpider):
 
             pic_match = re.search(r'<meta\s+property="og:image"\s+content="([^"]+)"', html)
             if not pic_match:
-                pic_match = re.search(r'<img[^>]+src="(https://pics\.javhd\.today[^"]+)"', html)
+                pic_match = re.search(r'<img[^>]+src="(https://pics\.javhd[z]?\.today[^"]+)"', html)
             pic = pic_match.group(1) if pic_match else ""
 
             desc = ""
@@ -225,25 +228,36 @@ class Spider(BaseSpider):
             if dm:
                 desc = "上映: " + dm.group(1)
 
-            # 提取视频数字 ID，构造 embed 地址（更容易被嗅探）
-            vid = ""
-            m_vid = re.search(r"/(\d+)/", url)
-            if m_vid:
-                vid = m_vid.group(1)
-            embed_url = f"{self.host}/embed/{vid}/" if vid else url
+            # 解析 data-embeds（base64 JSON 数组，每组是多个备用 embed 地址）
+            play_from_list = []
+            play_url_list = []
+            seen_names = set()
 
-            servers = re.findall(
-                r'(Fastserver|Myserver|Topserver|STserver|Cloudwish|Mycloudz|Upnshare|Streamtape|Dood|Lulust|Mangocloud|Limecloud|BpServer|VIP|HOST)',
-                html, re.I
+            # 同时匹配 data-embeds + data-name 两种属性顺序
+            pattern = re.compile(
+                r'data-embeds="([^"]+)"[^>]*?data-name="([^"]+)"|data-name="([^"]+)"[^>]*?data-embeds="([^"]+)"',
+                re.I | re.S
             )
-            servers = list(dict.fromkeys([s.strip() for s in servers if s.strip()]))
-            if not servers:
-                servers = ["播放"]
+            for m in pattern.finditer(html):
+                emb_b64 = m.group(1) or m.group(4)
+                name = (m.group(2) or m.group(3) or "线路").strip()
+                if not emb_b64 or name in seen_names:
+                    continue
+                try:
+                    embeds = json.loads(base64.b64decode(emb_b64).decode("utf-8", errors="ignore"))
+                except Exception:
+                    continue
+                if not embeds or not isinstance(embeds, list):
+                    continue
+                seen_names.add(name)
+                # 取该线路第一个 embed 地址，交给 playerContent 解析 m3u8
+                play_from_list.append(name)
+                play_url_list.append(f"{name}${embeds[0]}")
 
-            # 线路1：embed（推荐，方便嗅探）
-            # 线路2：原详情页（备用）
-            play_from = "Embed$$$" + "$$$".join(servers)
-            play_url = f"Embed${embed_url}$$$" + "$$$".join([f"{s}${url}" for s in servers])
+            # 兜底
+            if not play_from_list:
+                play_from_list = ["播放"]
+                play_url_list = [f"播放${url}"]
 
             result["list"].append({
                 "vod_id": ids[0],
@@ -256,58 +270,74 @@ class Spider(BaseSpider):
                 "vod_actor": "",
                 "vod_director": "",
                 "vod_content": desc,
-                "vod_play_from": play_from,
-                "vod_play_url": play_url
+                "vod_play_from": "$$$".join(play_from_list),
+                "vod_play_url": "$$$".join(play_url_list)
             })
         except Exception as e:
             print(f"[detailContent] error: {e}")
         return result
 
     def playerContent(self, flag, id, vipFlags):
-        # 该站视频在第三方（Dood/Streamtape/Cloudwish等），必须依赖客户端嗅探
+        """
+        id 可能是：
+        1) stream.javhdz.today/embed.php?p=xxx  （来自 data-embeds）
+        2) 详情页地址（兜底）
+        目标：解析出真正的 m3u8 直链，parse=0 直接播放
+        """
+        from urllib.parse import urljoin
         headers = {
             "User-Agent": self.headers.get("User-Agent", "Mozilla/5.0"),
             "Referer": self.host + "/",
         }
-        result = {"parse": 1, "playUrl": "", "url": "", "header": headers}
+        result = {"parse": 0, "playUrl": "", "url": "", "header": headers}
         try:
             url = id if id.startswith("http") else self.host + id
 
-            # 如果是详情页，优先转成 embed 地址
-            if "/embed/" not in url:
-                m_vid = re.search(r"/(\d+)/", url)
-                if m_vid:
-                    url = f"{self.host}/embed/{m_vid.group(1)}/"
-
-            html = self.fetch(url)
-            if not html:
+            # 已经是 m3u8
+            if ".m3u8" in url:
                 result["url"] = url
-                result["parse"] = 1
-                return result
-
-            # 直接 m3u8 / mp4
-            m3u8 = re.search(r'(https?://[^"\'\s>]+\.m3u8[^"\'\s>]*)', html)
-            if m3u8:
-                result["url"] = m3u8.group(1)
-                result["parse"] = 0
-                return result
-            mp4 = re.search(r'(https?://[^"\'\s>]+\.mp4[^"\'\s>]*)', html)
-            if mp4:
-                result["url"] = mp4.group(1)
                 result["parse"] = 0
                 return result
 
-            # iframe 内嵌第三方
-            iframe = re.search(r'<iframe[^>]+src=["\']([^"\']+)["\']', html, re.I)
-            if iframe:
-                iu = iframe.group(1)
-                if iu.startswith("//"):
-                    iu = "https:" + iu
-                result["url"] = iu
-                result["parse"] = 1
-                return result
+            # 情况1：embed.php —— 页面内含 /universal-stream-hls/.../playlist.m3u8
+            if "embed.php" in url or "stream" in url and "javhd" in url:
+                html = self.fetch(url)
+                if html:
+                    # 相对或绝对 m3u8
+                    m3u8s = re.findall(r'["\']([^"\']*m3u8[^"\']*)["\']', html)
+                    for p in m3u8s:
+                        full = urljoin(url, p)
+                        if "universal-stream" in full or full.endswith(".m3u8"):
+                            result["url"] = full
+                            result["parse"] = 0
+                            result["header"] = {
+                                "User-Agent": headers["User-Agent"],
+                                "Referer": url,
+                            }
+                            return result
+                    # 也尝试完整 https m3u8
+                    abs_m3u8 = re.search(r'(https?://[^"\'\s>]+\.m3u8[^"\'\s>]*)', html)
+                    if abs_m3u8:
+                        result["url"] = abs_m3u8.group(1)
+                        result["parse"] = 0
+                        return result
 
-            # 兜底：返回 embed/详情，让蜂蜜影视嗅探
+            # 情况2：详情页 —— 先解 data-embeds，再递归取 m3u8
+            if "javhd" in url and "embed.php" not in url:
+                html = self.fetch(url)
+                if html:
+                    import base64
+                    m = re.search(r'data-embeds="([^"]+)"', html)
+                    if m:
+                        try:
+                            embeds = json.loads(base64.b64decode(m.group(1)).decode("utf-8", errors="ignore"))
+                            if embeds:
+                                # 递归用第一个 embed
+                                return self.playerContent(flag, embeds[0], vipFlags)
+                        except Exception:
+                            pass
+
+            # 兜底嗅探
             result["url"] = url
             result["parse"] = 1
         except Exception as e:
