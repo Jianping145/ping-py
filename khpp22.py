@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-色库视频 / 学习教程2026 — https://992.khpp22.cc
+色库视频 / 学习教程2026 — https://775.khpp33.cc
 蜂蜜影视 Python 源（参考肉視頻 localProxy / getProxyUrl 兼容方式）
 
 API: /api/v1/*
@@ -20,8 +20,8 @@ from base.spider import Spider
 
 class Spider(Spider):
 
-    siteUrl = "https://992.khpp22.cc"
-    apiBase = "https://992.khpp22.cc/api/v1"
+    siteUrl = "https://775.khpp33.cc"
+    apiBase = "https://775.khpp33.cc/api/v1"
     UA = (
         "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
