@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # 站点：YouPorn  https://www.youporn.com
 # 适配：蜂蜜影视 / TVBox
-# 修复：封面优先用 fi1-ph（无需 Referer），避免 pix-cdn77 的 403
+# 修复：pix-cdn77 封面走本地代理并带 Referer，解决 403
 
 import re
 import json
@@ -9,7 +9,7 @@ from urllib import parse
 
 try:
     from base.spider import Spider as BaseSpider
-except:
+except Exception:
     class BaseSpider:
         pass
 
@@ -21,7 +21,7 @@ class Spider(BaseSpider):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Referer": self.host + "/",
             "Accept-Language": "en-US,en;q=0.9",
-            "Cookie": "age_verified=1; platform=pc; age_gate=1"
+            "Cookie": "age_verified=1; platform=pc; age_gate=1",
         }
         try:
             import requests
@@ -77,40 +77,62 @@ class Spider(BaseSpider):
         r.encoding = "utf-8"
         return r
 
+    def _wrap_pic(self, pic):
+        """需要 Referer 的封面走本地 Python 代理，避免 App 直连 403"""
+        if not pic:
+            return ""
+        pic = pic.replace("&amp;", "&")
+        # fi1 等不需要 Referer，直接用
+        if "pix-cdn77" not in pic:
+            return pic
+        # pix-cdn77 必须带 Referer：走 9978 代理（蜂蜜影视 PyHttpProxy）
+        # 同时附带 header 参数，兼容多种代理实现
+        enc = parse.quote(pic, safe="")
+        # 常见两种写法，优先短链
+        return f"http://127.0.0.1:9978/proxy?do=image&url={enc}"
+
     def _pick_cover(self, block):
-        """优先选不需要 Referer 的封面，避免 pix-cdn77 在 App 内 403"""
         candidates = re.findall(
             r'(?:data-(?:src|poster)|src)="(https?://[^"]+)"',
-            block, re.I
+            block,
+            re.I,
         )
-        candidates = [c.replace("&amp;", "&") for c in candidates if not c.startswith("data:")]
-        # 优先 fi1 / 老 CDN
+        candidates = [
+            c.replace("&amp;", "&")
+            for c in candidates
+            if c and not c.startswith("data:")
+        ]
+        # 1) 优先不需要 Referer 的
         for c in candidates:
             if "pix-cdn77" not in c and "ypncdn" in c:
-                return c
+                return self._wrap_pic(c)
         for c in candidates:
-            if "pix-cdn77" not in c and any(x in c for x in [".jpg", ".jpeg", ".png", ".webp"]):
-                return c
-        # 没有更好的才用 pix（会 403，但总比没有强）
+            if "pix-cdn77" not in c and any(
+                x in c.lower() for x in [".jpg", ".jpeg", ".png", ".webp"]
+            ):
+                return self._wrap_pic(c)
+        # 2) 只有 pix 时也返回（会走代理）
         for c in candidates:
-            if "ypncdn" in c:
-                return c
-        return candidates[0] if candidates else ""
+            if "ypncdn" in c or "phncdn" in c:
+                return self._wrap_pic(c)
+        return self._wrap_pic(candidates[0]) if candidates else ""
 
     def _parse_list(self, html):
         videos = []
         for m in re.finditer(
             r'<article[^>]+data-video-id="(\d+)"[^>]*aria-label="([^"]+)"[^>]*>',
-            html, re.I
+            html,
+            re.I,
         ):
             vid, title = m.group(1), m.group(2).strip()
-            tail = html[m.end(): m.end() + 2800]
+            tail = html[m.end() : m.end() + 2800]
             pic = self._pick_cover(tail)
 
             duration = ""
             d_m = re.search(
                 r'video-duration[^>]*>[\s\S]*?([0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?)',
-                tail, re.I
+                tail,
+                re.I,
             )
             if d_m:
                 duration = d_m.group(1).strip()
@@ -118,18 +140,22 @@ class Spider(BaseSpider):
             remarks = duration
             if duration:
                 parts = [int(x) for x in duration.split(":")]
-                secs = parts[0] * 60 + parts[1] if len(parts) == 2 else (
-                    parts[0] * 3600 + parts[1] * 60 + parts[2]
+                secs = (
+                    parts[0] * 60 + parts[1]
+                    if len(parts) == 2
+                    else parts[0] * 3600 + parts[1] * 60 + parts[2]
                 )
                 if secs <= 90:
                     remarks = f"{duration} 预告"
 
-            videos.append({
-                "vod_id": f"/watch/{vid}/",
-                "vod_name": title,
-                "vod_pic": pic,
-                "vod_remarks": remarks
-            })
+            videos.append(
+                {
+                    "vod_id": f"/watch/{vid}/",
+                    "vod_name": title,
+                    "vod_pic": pic,
+                    "vod_remarks": remarks,
+                }
+            )
 
         seen = set()
         unique = []
@@ -150,18 +176,26 @@ class Spider(BaseSpider):
             r = self._get(url)
             html = r.text if r is not None else ""
             if not html:
-                return {"list": [], "page": int(pg), "pagecount": int(pg), "limit": 24, "total": 0}
+                return {
+                    "list": [],
+                    "page": int(pg),
+                    "pagecount": int(pg),
+                    "limit": 24,
+                    "total": 0,
+                }
 
             videos = self._parse_list(html)
             has_next = bool(re.search(rf"page={int(pg) + 1}", html))
-            pagecount = int(pg) if not videos else (int(pg) + 30 if has_next else int(pg) + 1)
+            pagecount = (
+                int(pg) if not videos else (int(pg) + 30 if has_next else int(pg) + 1)
+            )
 
             return {
                 "list": videos,
                 "page": int(pg),
                 "pagecount": pagecount,
                 "limit": 24,
-                "total": pagecount * 24
+                "total": pagecount * 24,
             }
         except Exception as e:
             print(f"[categoryContent] error: {e}")
@@ -212,7 +246,6 @@ class Spider(BaseSpider):
                     },
                 )
                 if rr.status_code != 200:
-                    print(f"[resolve] api status {rr.status_code}")
                     continue
                 text = rr.text.strip()
                 if not text.startswith("[") and not text.startswith("{"):
@@ -248,7 +281,6 @@ class Spider(BaseSpider):
 
             play_url = self._resolve_play_url(html, url)
 
-            # 详情封面也优先非 pix
             pic = ""
             all_pics = re.findall(
                 r'(https?://[^"\']+(?:ypncdn|phncdn)[^"\']+\.(?:jpg|jpeg|png|webp)[^"\']*)',
@@ -260,7 +292,9 @@ class Spider(BaseSpider):
                     pic = p
                     break
             if not pic and all_pics:
-                pic = all_pics[0].replace("&amp;", "&")
+                pic = self._wrap_pic(all_pics[0].replace("&amp;", "&"))
+            else:
+                pic = self._wrap_pic(pic) if pic else ""
 
             if play_url:
                 vod_play_from = "YouPorn"
@@ -270,14 +304,16 @@ class Spider(BaseSpider):
                 vod_play_url = f"正片${url}"
 
             return {
-                "list": [{
-                    "vod_id": ids[0],
-                    "vod_name": title,
-                    "vod_pic": pic,
-                    "vod_content": title,
-                    "vod_play_from": vod_play_from,
-                    "vod_play_url": vod_play_url,
-                }]
+                "list": [
+                    {
+                        "vod_id": ids[0],
+                        "vod_name": title,
+                        "vod_pic": pic,
+                        "vod_content": title,
+                        "vod_play_from": vod_play_from,
+                        "vod_play_url": vod_play_url,
+                    }
+                ]
             }
         except Exception as e:
             print(f"[detailContent] error: {e}")
@@ -301,7 +337,6 @@ class Spider(BaseSpider):
             return {"list": []}
 
     def playerContent(self, flag, id, vipFlags):
-        # 播放必须带 Referer，否则 CDN 可能拒绝
         headers = {
             "User-Agent": self.headers["User-Agent"],
             "Referer": "https://www.youporn.com/",
@@ -313,11 +348,34 @@ class Spider(BaseSpider):
         return {
             "parse": 1,
             "url": play,
-            "header": json.dumps({
-                **headers,
-                "Cookie": "age_verified=1; platform=pc; age_gate=1",
-            }),
+            "header": json.dumps(
+                {
+                    **headers,
+                    "Cookie": "age_verified=1; platform=pc; age_gate=1",
+                }
+            ),
         }
+
+    def localProxy(self, param):
+        """本地代理：给需要 Referer 的图片/资源加头"""
+        try:
+            import requests
+
+            url = param.get("url") or param.get("src") or ""
+            if not url:
+                return [400, "text/plain", {}, b"missing url"]
+            url = parse.unquote(url)
+            headers = {
+                "User-Agent": self.headers["User-Agent"],
+                "Referer": "https://www.youporn.com/",
+                "Origin": "https://www.youporn.com",
+            }
+            r = requests.get(url, headers=headers, timeout=15, verify=False)
+            ctype = r.headers.get("Content-Type", "image/jpeg")
+            return [r.status_code, ctype, {}, r.content]
+        except Exception as e:
+            print(f"[localProxy] {e}")
+            return [500, "text/plain", {}, str(e).encode("utf-8")]
 
     def fetch(self, url, headers=None):
         try:
