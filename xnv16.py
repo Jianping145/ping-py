@@ -98,24 +98,28 @@ class Spider(BaseSpider):
         pg = str(pg or "1")
         try:
             if tid.startswith("sort_"):
+                # 热门资源：第1页 /sort/id/xx.html ，第2页起 /type/id/xx/2.html
                 cid = tid.replace("sort_", "")
                 if pg == "1":
                     url = f"{self.host}/sort/id/{cid}.html"
                 else:
-                    url = f"{self.host}/sort/id/{cid}/page/{pg}.html"
+                    url = f"{self.host}/type/id/{cid}/{pg}.html"
             else:
+                # 普通分类：第1页 /hunt/名.html ，第2页起 /hunt/名/h/2.html
                 if pg == "1":
                     url = f"{self.host}/hunt/{parse.quote(tid)}.html"
                 else:
-                    url = f"{self.host}/hunt/{parse.quote(tid)}/page/{pg}.html"
+                    url = f"{self.host}/hunt/{parse.quote(tid)}/h/{pg}.html"
             html = self.fetch(url)
             videos = self._parse_list(html)
+            # 根据是否还有内容粗略估计总页（有数据就继续给大页数）
+            pagecount = 9999 if videos else int(pg)
             return {
                 "list": videos,
                 "page": int(pg),
-                "pagecount": 9999,
+                "pagecount": pagecount,
                 "limit": 24,
-                "total": 999999,
+                "total": 999999 if videos else 0,
             }
         except Exception as e:
             print(f"[xnv16] category error: {e}")
@@ -206,7 +210,7 @@ class Spider(BaseSpider):
             if pg == "1":
                 url = f"{self.host}/hunt/{parse.quote(key)}.html"
             else:
-                url = f"{self.host}/hunt/{parse.quote(key)}/page/{pg}.html"
+                url = f"{self.host}/hunt/{parse.quote(key)}/h/{pg}.html"
             html = self.fetch(url)
             return {"list": self._parse_list(html)}
         except Exception as e:
