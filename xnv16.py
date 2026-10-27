@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # 小女16 / xnv16jep.click  蜂蜜影视(FongMi) / TVBox Python Spider
-# 修复版：封面完整提取 + 真实 m3u8 直链播放
+# v3：主用 sort/type 分类（封面正常），修正分页
 # 境界：轮海秘境 · 彼岸境
 
 import sys
@@ -34,42 +34,33 @@ class Spider(BaseSpider):
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         }
+        # 全部使用 sort/type 数字分类（封面 CDN 正常）
+        # type_id 统一用数字字符串，内部自动选 sort 或 type 路径
+        # 仅保留站点确有内容的分类（285-300 在站内为空）
         self.classes = [
-            {"type_id": "高清无码", "type_name": "高清无码"},
-            {"type_id": "每天更新", "type_name": "每天更新"},
-            {"type_id": "国产主播", "type_name": "国产主播"},
-            {"type_id": "日本动漫", "type_name": "日本动漫"},
-            {"type_id": "国产视频", "type_name": "国产视频"},
-            {"type_id": "女优明星", "type_name": "女优明星"},
-            {"type_id": "网曝黑料", "type_name": "网曝黑料"},
-            {"type_id": "黑料大瓜", "type_name": "黑料大瓜"},
-            {"type_id": "福利一区", "type_name": "福利一区"},
-            {"type_id": "自拍偷拍", "type_name": "自拍偷拍"},
-            {"type_id": "糖心VLOG", "type_name": "糖心VLOG"},
-            {"type_id": "中文高清", "type_name": "中文高清"},
-            {"type_id": "白虎无码", "type_name": "白虎无码"},
-            {"type_id": "热门泄密", "type_name": "热门泄密"},
-            {"type_id": "AV解说", "type_name": "AV解说"},
-            {"type_id": "国产9探花", "type_name": "国产9探花"},
-            {"type_id": "中文字幕", "type_name": "中文字幕"},
-            {"type_id": "制服诱惑", "type_name": "制服诱惑"},
-            {"type_id": "少妇诱惑", "type_name": "少妇诱惑"},
-            {"type_id": "sort_21", "type_name": "无码专区"},
-            {"type_id": "sort_25", "type_name": "制服诱惑·热"},
-            {"type_id": "sort_27", "type_name": "三级伦理"},
-            {"type_id": "sort_29", "type_name": "AI换脸"},
-            {"type_id": "sort_30", "type_name": "中文字幕·热"},
-            {"type_id": "sort_32", "type_name": "卡通动漫"},
-            {"type_id": "sort_35", "type_name": "欧美系列"},
-            {"type_id": "sort_36", "type_name": "美女主播"},
-            {"type_id": "sort_38", "type_name": "国产自拍"},
-            {"type_id": "sort_40", "type_name": "熟女人妻"},
-            {"type_id": "sort_42", "type_name": "萝莉少女"},
-            {"type_id": "sort_50", "type_name": "抖阴视频"},
-            {"type_id": "sort_53", "type_name": "网爆黑料"},
-            {"type_id": "sort_54", "type_name": "欧美无码"},
-            {"type_id": "sort_55", "type_name": "女优明星·热"},
-            {"type_id": "sort_56", "type_name": "SM调教"},
+            {"type_id": "21", "type_name": "无码专区"},
+            {"type_id": "25", "type_name": "制服诱惑"},
+            {"type_id": "27", "type_name": "三级伦理"},
+            {"type_id": "29", "type_name": "AI换脸"},
+            {"type_id": "30", "type_name": "中文字幕"},
+            {"type_id": "32", "type_name": "卡通动漫"},
+            {"type_id": "35", "type_name": "欧美系列"},
+            {"type_id": "36", "type_name": "美女主播"},
+            {"type_id": "38", "type_name": "国产自拍"},
+            {"type_id": "40", "type_name": "熟女人妻"},
+            {"type_id": "42", "type_name": "萝莉少女"},
+            {"type_id": "44", "type_name": "女同性爱"},
+            {"type_id": "46", "type_name": "多人群交"},
+            {"type_id": "48", "type_name": "美乳巨乳"},
+            {"type_id": "49", "type_name": "强奸乱伦"},
+            {"type_id": "50", "type_name": "抖阴视频"},
+            {"type_id": "51", "type_name": "韩国主播"},
+            {"type_id": "52", "type_name": "网红头条"},
+            {"type_id": "53", "type_name": "网爆黑料"},
+            {"type_id": "54", "type_name": "欧美无码"},
+            {"type_id": "55", "type_name": "女优明星"},
+            {"type_id": "56", "type_name": "SM调教"},
+            {"type_id": "57", "type_name": "AV解说"},
         ]
 
     def getName(self):
@@ -89,30 +80,30 @@ class Spider(BaseSpider):
 
     def homeVideoContent(self):
         try:
-            html = self.fetch(self.host)
+            # 首页推荐用无码专区
+            html = self.fetch(f"{self.host}/sort/id/21.html")
             return {"list": self._parse_list(html)}
         except Exception:
             return {"list": []}
 
     def categoryContent(self, tid, pg, filter, extend):
         pg = str(pg or "1")
+        tid = str(tid).replace("sort_", "")  # 兼容旧 id
         try:
-            if tid.startswith("sort_"):
-                # 热门资源：第1页 /sort/id/xx.html ，第2页起 /type/id/xx/2.html
-                cid = tid.replace("sort_", "")
-                if pg == "1":
-                    url = f"{self.host}/sort/id/{cid}.html"
-                else:
-                    url = f"{self.host}/type/id/{cid}/{pg}.html"
+            html = ""
+            if pg == "1":
+                # 第1页：优先 sort，失败再试 type
+                for kind in ("sort", "type"):
+                    url = f"{self.host}/{kind}/id/{tid}.html"
+                    html = self.fetch(url)
+                    if html and "/info/id/" in html:
+                        break
             else:
-                # 普通分类：第1页 /hunt/名.html ，第2页起 /hunt/名/h/2.html
-                if pg == "1":
-                    url = f"{self.host}/hunt/{parse.quote(tid)}.html"
-                else:
-                    url = f"{self.host}/hunt/{parse.quote(tid)}/h/{pg}.html"
-            html = self.fetch(url)
+                # 第2页起固定 /type/id/xx/N.html
+                url = f"{self.host}/type/id/{tid}/{pg}.html"
+                html = self.fetch(url)
+
             videos = self._parse_list(html)
-            # 根据是否还有内容粗略估计总页（有数据就继续给大页数）
             pagecount = 9999 if videos else int(pg)
             return {
                 "list": videos,
@@ -183,8 +174,8 @@ class Spider(BaseSpider):
                     "Referer": self.host + "/",
                 }),
             }
-        if "/play/id/" in id or (id and id.isdigit()):
-            m = re.search(r"(\d+)", id)
+        if "/play/id/" in id or (id and str(id).isdigit()):
+            m = re.search(r"(\d+)", str(id))
             real = self._get_play_url(m.group(1) if m else id)
             if real:
                 return {
@@ -221,7 +212,6 @@ class Spider(BaseSpider):
         return [200, "text/plain", ""]
 
     def _get_play_url(self, vid):
-        """从 /play/id/xxx.html 提取 var playUrl = 'xxx.m3u8'"""
         try:
             play_page = f"{self.host}/play/id/{vid}.html"
             html = self.fetch(play_page)
@@ -322,12 +312,8 @@ class Spider(BaseSpider):
 
 if __name__ == "__main__":
     sp = Spider()
-    print("=== category 国产主播 ===")
-    cat = sp.categoryContent("国产主播", "1", False, {})
-    print("count:", len(cat.get("list", [])))
+    print("classes:", len(sp.homeContent(False)["class"]))
+    cat = sp.categoryContent("21", "1", False, {})
+    print("sort21 count:", len(cat.get("list", [])))
     for v in cat.get("list", [])[:3]:
-        print(v)
-    if cat.get("list"):
-        print("\n=== detail ===")
-        d = sp.detailContent([cat["list"][0]["vod_id"]])
-        print(json.dumps(d, ensure_ascii=False, indent=2)[:800])
+        print(" ", "有封面" if v.get("vod_pic") else "无", v.get("vod_name","")[:30], (v.get("vod_pic") or "")[:50])
