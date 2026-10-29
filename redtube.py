@@ -194,7 +194,7 @@ class Spider(BaseSpider):
                 "list": [{
                     "vod_id": vid,
                     "vod_name": title,
-                    "vod_pic": pic,
+                    "vod_pic": self._proxy_pic(pic),
                     "vod_content": title,
                     "vod_remarks": "",
                     "vod_year": "",
@@ -243,8 +243,52 @@ class Spider(BaseSpider):
             print(f"[redtube] search error: {e}")
             return {"list": []}
 
+
+    def _proxy_pic(self, pic):
+        """把封面改成走 localProxy，解决 CDN 403 防盗链"""
+        if not pic or not pic.startswith("http"):
+            return pic or ""
+        try:
+            # 优先用基类代理地址（蜂蜜影视 / TVBox 会注入）
+            if hasattr(self, "getProxyUrl"):
+                base = self.getProxyUrl()
+                if base:
+                    return f"{base}&url={parse.quote(pic)}"
+        except Exception:
+            pass
+        # 无基类时返回原图（电脑调试仍可看）
+        return pic
+
     def localProxy(self, param):
-        return [200, "text/plain", ""]
+        """图片防盗链代理：用站点 Referer 拉取封面，避免客户端 403"""
+        try:
+            import requests
+            from urllib import parse as up
+            # param 可能是 dict 或已解析
+            if isinstance(param, dict):
+                url = param.get("url") or param.get("target") or ""
+            else:
+                url = str(param or "")
+            if not url:
+                return [400, "text/plain", b"no url"]
+            # 兼容二次编码
+            for _ in range(2):
+                if "%" in url and ("http%" in url.lower() or url.lower().startswith("%")):
+                    url = up.unquote(url)
+            if not url.startswith("http"):
+                return [400, "text/plain", b"bad url"]
+            headers = {
+                "User-Agent": self.headers["User-Agent"],
+                "Referer": self.host + "/",
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+            }
+            resp = requests.get(url, headers=headers, timeout=12, verify=False)
+            ctype = resp.headers.get("Content-Type") or "image/jpeg"
+            if resp.status_code != 200:
+                return [resp.status_code, "text/plain", resp.content[:200]]
+            return [200, ctype, resp.content]
+        except Exception as e:
+            return [500, "text/plain", str(e).encode("utf-8")]
 
     def _extract_play(self, html, vid):
         """从详情页 mediaDefinitions 拉取 HLS/MP4 多清晰度"""
@@ -428,7 +472,7 @@ class Spider(BaseSpider):
             videos.append({
                 "vod_id": vod_id,
                 "vod_name": title,
-                "vod_pic": pic,
+                "vod_pic": self._proxy_pic(pic),
                 "vod_remarks": "",
             })
         return videos
