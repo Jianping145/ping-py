@@ -338,13 +338,42 @@ class Spider(BaseSpider):
                 cats.append({"type_id": slug, "type_name": name})
         return cats
 
+    def _pick_pic(self, img):
+        """按优先级取封面，跳过 base64 占位图"""
+        if not img:
+            return ""
+        candidates = []
+        for key in ("data-src", "data-o_thumb", "data-mediumthumb", "data-largeThumb",
+                    "data-thumb_url", "data-path", "data-srcset", "srcset", "src"):
+            v = img.get(key) or ""
+            if not v or not isinstance(v, str):
+                continue
+            # srcset 取第一段
+            if "srcset" in key:
+                v = v.split(",")[0].strip().split(" ")[0]
+            # path 模板去掉 {index}
+            if "{index}" in v:
+                v = v.replace("{index}", "8")
+            candidates.append(v.strip())
+        for pic in candidates:
+            if not pic or pic.startswith("data:"):
+                continue
+            if pic.startswith("//"):
+                pic = "https:" + pic
+            if not pic.startswith("http"):
+                continue
+            # 过滤明显无效
+            if "blank" in pic or "placeholder" in pic:
+                continue
+            return pic
+        return ""
+
     def _parse_list(self, html):
         if not html:
             return []
         videos = []
         soup = BeautifulSoup(html, "html.parser")
 
-        # 每个视频块
         blocks = soup.select("li.tm_video_block, li.videoblock_list, li.js_thumbContainer")
         if not blocks:
             blocks = soup.select('a.video_link[href^="/"]')
@@ -357,7 +386,6 @@ class Spider(BaseSpider):
             href = a.get("href") or ""
             m = re.match(r"^/(\d+)/?$", href.split("?")[0])
             if not m:
-                # 有时链接在块内其他 a
                 for aa in block.select("a[href^='/']"):
                     mm = re.match(r"^/(\d+)/?$", (aa.get("href") or "").split("?")[0])
                     if mm:
@@ -377,14 +405,25 @@ class Spider(BaseSpider):
                 if tw:
                     title = (tw.get("title") or tw.get_text(strip=True) or "").strip()
             if not title or re.match(r"^[\d:]+$", title):
+                # 再试 data-title
+                title = (block.get("data-title") or "").strip()
+            if not title or re.match(r"^[\d:]+$", title):
                 continue
 
-            pic = ""
-            img = block.select_one("img") if block.name != "a" else a.select_one("img")
-            if img:
-                pic = img.get("data-src") or img.get("data-mediumthumb") or img.get("data-path") or img.get("src") or ""
-            if pic.startswith("//"):
-                pic = "https:" + pic
+            img = None
+            if block.name != "a":
+                img = block.select_one("img")
+            if not img:
+                img = a.select_one("img")
+            pic = self._pick_pic(img)
+            # 块内任意 rdtcdn 兜底
+            if not pic:
+                for u in re.findall(r'https?://[^"\'\s<>]+(?:rdtcdn|phncdn)[^"\'\s<>]+', str(block)):
+                    if "{index}" in u:
+                        u = u.replace("{index}", "8")
+                    if not u.endswith(".mp4") and "mediabook" not in u:
+                        pic = u
+                        break
 
             videos.append({
                 "vod_id": vod_id,
