@@ -31,39 +31,69 @@ class Spider(BaseSpider):
         self.cdn = "https://spic2-147.vcwinford.cc"
         self._ssl = None
         # 官网真实路径（含 dm 前缀）
+        # 部分栏目必须带 dm 前缀，裸 /cn/xxx 会跳到空页
         self.classes = [
-            {"type_id": "cn/new", "type_name": "最近更新"},
-            {"type_id": "cn/release", "type_name": "新作上市"},
-            {"type_id": "cn/uncensored-leak", "type_name": "无码流出"},
+            {"type_id": "dm539/cn/new", "type_name": "最近更新"},
+            {"type_id": "dm635/cn/release", "type_name": "新作上市"},
+            {"type_id": "dm817/cn/uncensored-leak", "type_name": "无码流出"},
             {"type_id": "cn/actresses", "type_name": "女优一览"},
             {"type_id": "cn/actresses/ranking", "type_name": "女优排行"},
             {"type_id": "cn/genres", "type_name": "类型"},
             {"type_id": "cn/makers", "type_name": "发行商"},
             {"type_id": "cn/genres/VR", "type_name": "VR"},
-            {"type_id": "cn/today-hot", "type_name": "今日热门"},
-            {"type_id": "cn/weekly-hot", "type_name": "本周热门"},
-            {"type_id": "cn/monthly-hot", "type_name": "本月热门"},
-            {"type_id": "cn/siro", "type_name": "素人·SIRO"},
-            {"type_id": "cn/luxu", "type_name": "素人·LUXU"},
-            {"type_id": "cn/gana", "type_name": "素人·GANA"},
-            {"type_id": "cn/maan", "type_name": "素人·PRESTIGE"},
-            {"type_id": "cn/scute", "type_name": "素人·S-CUTE"},
-            {"type_id": "cn/ara", "type_name": "素人·ARA"},
-            {"type_id": "cn/fc2", "type_name": "无码·FC2"},
-            {"type_id": "cn/heyzo", "type_name": "无码·HEYZO"},
-            {"type_id": "cn/tokyohot", "type_name": "无码·东京热"},
-            {"type_id": "cn/1pondo", "type_name": "无码·一本道"},
-            {"type_id": "cn/caribbeancom", "type_name": "无码·Caribbeancom"},
-            {"type_id": "cn/caribbeancompr", "type_name": "无码·Caribbeancompr"},
-            {"type_id": "cn/10musume", "type_name": "无码·10musume"},
-            {"type_id": "cn/pacopacomama", "type_name": "无码·pacopacomama"},
-            {"type_id": "cn/gachinco", "type_name": "无码·Gachinco"},
-            {"type_id": "cn/xxxav", "type_name": "无码·XXX-AV"},
-            {"type_id": "cn/marriedslash", "type_name": "无码·人妻斩"},
-            {"type_id": "cn/naughty4610", "type_name": "无码·顽皮4610"},
-            {"type_id": "cn/naughty0930", "type_name": "无码·顽皮0930"},
-            {"type_id": "cn/chinese-subtitle", "type_name": "中文字幕"},
+            {"type_id": "dm301/cn/today-hot", "type_name": "今日热门"},
+            {"type_id": "dm170/cn/weekly-hot", "type_name": "本周热门"},
+            {"type_id": "dm273/cn/monthly-hot", "type_name": "本月热门"},
+            {"type_id": "dm36/cn/siro", "type_name": "素人·SIRO"},
+            {"type_id": "dm34/cn/luxu", "type_name": "素人·LUXU"},
+            {"type_id": "dm35/cn/gana", "type_name": "素人·GANA"},
+            {"type_id": "dm1004/cn/maan", "type_name": "素人·PRESTIGE"},
+            {"type_id": "dm38/cn/scute", "type_name": "素人·S-CUTE"},
+            {"type_id": "dm34/cn/ara", "type_name": "素人·ARA"},
+            {"type_id": "dm597/cn/fc2", "type_name": "无码·FC2"},
+            {"type_id": "dm2020563/cn/heyzo", "type_name": "无码·HEYZO"},
+            {"type_id": "dm42/cn/tokyohot", "type_name": "无码·东京热"},
+            {"type_id": "dm4551182/cn/1pondo", "type_name": "无码·一本道"},
+            {"type_id": "dm6840813/cn/caribbeancom", "type_name": "无码·Caribbeancom"},
+            {"type_id": "dm78420/cn/caribbeancompr", "type_name": "无码·Caribbeancompr"},
+            {"type_id": "dm6238706/cn/10musume", "type_name": "无码·10musume"},
+            {"type_id": "dm3240472/cn/pacopacomama", "type_name": "无码·pacopacomama"},
+            {"type_id": "dm150/cn/gachinco", "type_name": "无码·Gachinco"},
+            {"type_id": "dm42/cn/xxxav", "type_name": "无码·XXX-AV"},
+            {"type_id": "dm37/cn/marriedslash", "type_name": "无码·人妻斩"},
+            {"type_id": "dm33/cn/naughty4610", "type_name": "无码·顽皮4610"},
+            {"type_id": "dm37/cn/naughty0930", "type_name": "无码·顽皮0930"},
+            {"type_id": "dm278/cn/chinese-subtitle", "type_name": "中文字幕"},
         ]
+        # 无 dm 时的兜底映射
+        self.dm_map = {
+            "cn/new": "dm539/cn/new",
+            "cn/release": "dm635/cn/release",
+            "cn/uncensored-leak": "dm817/cn/uncensored-leak",
+            "cn/today-hot": "dm301/cn/today-hot",
+            "cn/weekly-hot": "dm170/cn/weekly-hot",
+            "cn/monthly-hot": "dm273/cn/monthly-hot",
+            "cn/siro": "dm36/cn/siro",
+            "cn/luxu": "dm34/cn/luxu",
+            "cn/gana": "dm35/cn/gana",
+            "cn/maan": "dm1004/cn/maan",
+            "cn/scute": "dm38/cn/scute",
+            "cn/ara": "dm34/cn/ara",
+            "cn/fc2": "dm597/cn/fc2",
+            "cn/heyzo": "dm2020563/cn/heyzo",
+            "cn/tokyohot": "dm42/cn/tokyohot",
+            "cn/1pondo": "dm4551182/cn/1pondo",
+            "cn/caribbeancom": "dm6840813/cn/caribbeancom",
+            "cn/caribbeancompr": "dm78420/cn/caribbeancompr",
+            "cn/10musume": "dm6238706/cn/10musume",
+            "cn/pacopacomama": "dm3240472/cn/pacopacomama",
+            "cn/gachinco": "dm150/cn/gachinco",
+            "cn/xxxav": "dm42/cn/xxxav",
+            "cn/marriedslash": "dm37/cn/marriedslash",
+            "cn/naughty4610": "dm33/cn/naughty4610",
+            "cn/naughty0930": "dm37/cn/naughty0930",
+            "cn/chinese-subtitle": "dm278/cn/chinese-subtitle",
+        }
 
     def getName(self):
         return self.name
@@ -91,7 +121,10 @@ class Spider(BaseSpider):
             page = int(pg or 1)
         except Exception:
             page = 1
-        tid = (tid or "cn/new").strip("/")
+        tid = (tid or "dm539/cn/new").strip("/")
+        # 兼容旧 type_id（无 dm 前缀）
+        if hasattr(self, "dm_map") and tid in self.dm_map:
+            tid = self.dm_map[tid]
         try:
             # 女优总览 / 排行 → 女优文件夹
             if tid in ("cn/actresses", "cn/actresses/ranking"):
@@ -106,9 +139,18 @@ class Spider(BaseSpider):
             # 例: cn/actresses/瀬户环奈  cn/makers/S1  cn/genres/人妻
             html = self.fetch(self._url(tid, page))
             videos = self._parse_list(html)
-            if not videos and page == 1:
-                html = self.fetch(self._url(tid, 1))
-                videos = self._parse_list(html)
+            if not videos:
+                # 裸路径空页时，尝试 dm247 前缀
+                slug = tid
+                if slug.startswith("cn/"):
+                    alt = "dm247/" + slug
+                    html = self.fetch(self._url(alt, page))
+                    videos = self._parse_list(html)
+                if not videos and slug.startswith("cn/") and hasattr(self, "dm_map"):
+                    mapped = self.dm_map.get(slug)
+                    if mapped:
+                        html = self.fetch(self._url(mapped, page))
+                        videos = self._parse_list(html)
             # 女优页有时编码不同，再试 unquote 路径
             if not videos and "/actresses/" in tid:
                 parts = tid.split("actresses/", 1)
