@@ -137,13 +137,23 @@ class Spider(BaseSpider):
             if episodes:
                 for ep in episodes:
                     num = ep.get("ep_num") or ep.get("num") or 0
-                    name = ep.get("title") or f"第{num}集"
-                    # 过长截断
-                    if len(name) > 30:
-                        name = f"第{num}集"
+                    try:
+                        num = int(num)
+                    except Exception:
+                        num = num
+                    # 统一选集名：第N集（API 有时返回整剧标题+数字，造成列表不一致）
+                    name = f"第{num}集"
                     play_parts.append(f"{name}${vid}|{num}")
             else:
-                play_parts.append(f"正片${vid}|1")
+                # 无分集列表时，用总集数生成
+                total = data.get("episode_count") or data.get("total_episodes") or 1
+                try:
+                    total = int(total)
+                except Exception:
+                    total = 1
+                total = max(1, min(total, 200))
+                for num in range(1, total + 1):
+                    play_parts.append(f"第{num}集${vid}|{num}")
 
             return {
                 "list": [{
@@ -166,42 +176,84 @@ class Spider(BaseSpider):
             return {"list": []}
 
     def playerContent(self, flag, id, vipFlags):
+        base_headers = {
+            "User-Agent": self.headers["User-Agent"],
+            "Referer": self.host + "/",
+            "Origin": self.host,
+        }
         if self.isVideoFormat(id):
-            return {
-                "parse": 0,
-                "url": id,
-                "header": json.dumps({
-                    "User-Agent": self.headers["User-Agent"],
-                    "Referer": self.host + "/",
-                }),
-            }
+            # 直链可能需要 CDN 鉴权（由 detail/play 写入 id 时带上）
+            return {"parse": 0, "url": id, "header": json.dumps(base_headers)}
         try:
             vid, ep = id, "1"
             if "|" in id:
                 vid, ep = id.split("|", 1)
-            data = self._api_json(f"/api/videos/{vid}/play?ep={ep}")
+            vid = str(vid).strip()
+            ep = str(ep).strip() or "1"
+            data = self._playback(vid, ep)
             url = ""
+            headers = dict(base_headers)
             if data:
-                url = data.get("video_url") or data.get("video_url_hevc") or ""
+                streams = data.get("streams") or {}
+                url = streams.get("main") or streams.get("hevc") or data.get("video_url") or data.get("url") or ""
+                # 预览太短，仅当没有 main 时才用
+                if not url:
+                    url = streams.get("preview") or ""
+                cdn = data.get("cdn") or {}
+                auth_key = cdn.get("authKey") or "x-cdn-auth"
+                auth_val = cdn.get("authValue") or ""
+                if auth_val:
+                    headers[auth_key] = auth_val
+            if not url:
+                # 兼容旧接口
+                old = self._api_json(f"/api/videos/{vid}/play?ep={ep}")
+                if old:
+                    url = old.get("video_url") or old.get("video_url_hevc") or ""
             if url:
                 return {
                     "parse": 0,
+                    "jx": 0,
                     "url": url,
-                    "header": json.dumps({
-                        "User-Agent": self.headers["User-Agent"],
-                        "Referer": self.host + "/",
-                    }),
+                    "header": json.dumps(headers),
                 }
         except Exception as e:
             print(f"[huangguoai] play error: {e}")
         return {
             "parse": 1,
-            "url": id,
-            "header": json.dumps({
-                "User-Agent": self.headers["User-Agent"],
-                "Referer": self.host + "/",
-            }),
+            "url": self.host + f"/video/{id.split('|')[0]}/" if id else self.host,
+            "header": json.dumps(base_headers),
         }
+
+    def _playback(self, vid, ep="1"):
+        """POST /api/videos/{id}/episodes/{ep}/playback  取签名 m3u8 + CDN 头。"""
+        import requests
+        ep = str(ep or "1").strip()
+        paths = [
+            f"/api/videos/{vid}/episodes/{ep}/playback",
+            f"/api/videos/{vid}/playback",
+        ]
+        headers = {
+            **self.headers,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Origin": self.host,
+            "Referer": f"{self.host}/video/{vid}/",
+        }
+        for path in paths:
+            try:
+                url = self.host + path
+                resp = requests.post(url, data="{}", headers=headers, timeout=15, verify=False)
+                if resp.status_code != 200:
+                    continue
+                j = resp.json()
+                data = j.get("data") if isinstance(j, dict) else None
+                if not data or (isinstance(data, list) and not data):
+                    continue
+                if isinstance(data, dict) and (data.get("streams") or data.get("video_url") or data.get("url")):
+                    return data
+            except Exception as e:
+                print(f"[huangguoai] playback {path}: {e}")
+        return {}
 
     def searchContent(self, key, quick, pg="1"):
         pg = str(pg or "1")
